@@ -22,7 +22,10 @@ INSERT INTO system_settings (
   require_user_admin_approval,
   require_expense_admin_approval,
   require_refund_admin_approval,
-  require_repair_admin_approval
+  require_repair_admin_approval,
+  require_payment_admin_approval,
+  require_customer_edit_admin_approval,
+  require_attendance_override_admin_approval
 ) VALUES (
   1,
   'Haji Mohamed Yunus Valibhoy Community Centre',
@@ -37,6 +40,9 @@ INSERT INTO system_settings (
   2000,
   15000,
   5,
+  1,
+  1,
+  1,
   1,
   1,
   1,

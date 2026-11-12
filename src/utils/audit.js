@@ -37,6 +37,9 @@ async function getSystemSettings(conn = null) {
     require_expense_admin_approval: 1,
     require_refund_admin_approval: 1,
     require_repair_admin_approval: 1,
+    require_payment_admin_approval: 1,
+    require_customer_edit_admin_approval: 1,
+    require_attendance_override_admin_approval: 1,
   };
 }
 

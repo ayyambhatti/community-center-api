@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS system_settings (
   require_expense_admin_approval TINYINT(1) NOT NULL DEFAULT 1,
   require_refund_admin_approval TINYINT(1) NOT NULL DEFAULT 1,
   require_repair_admin_approval TINYINT(1) NOT NULL DEFAULT 1,
+  require_payment_admin_approval TINYINT(1) NOT NULL DEFAULT 1,
+  require_customer_edit_admin_approval TINYINT(1) NOT NULL DEFAULT 1,
+  require_attendance_override_admin_approval TINYINT(1) NOT NULL DEFAULT 1,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -116,6 +119,7 @@ CREATE TABLE IF NOT EXISTS payments (
   mode ENUM('Cash', 'UPI', 'Bank Transfer', 'Cheque') NOT NULL,
   reference VARCHAR(120) NOT NULL DEFAULT '',
   date_label VARCHAR(64) NOT NULL,
+  status ENUM('Approved', 'Pending', 'Rejected') NOT NULL DEFAULT 'Approved',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_payments_booking (booking_id),
   CONSTRAINT fk_payments_booking FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE
@@ -233,19 +237,22 @@ CREATE TABLE IF NOT EXISTS staff_attendance_logs (
   latitude DECIMAL(10, 7) NULL,
   longitude DECIMAL(10, 7) NULL,
   status ENUM('Present', 'Late', 'Absent') NOT NULL DEFAULT 'Present',
+  approval_status ENUM('Approved', 'Pending', 'Rejected') NOT NULL DEFAULT 'Approved',
+  override_reason TEXT NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_attendance_date (date_iso)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS approvals (
   id VARCHAR(64) PRIMARY KEY,
-  type ENUM('Booking', 'Free Hall Use', 'Booking Cancellation', 'User Access', 'Password Reset', 'Deposit Refund', 'Expense', 'Repair Cost', 'Hall Block') NOT NULL,
+  type ENUM('Booking', 'Free Hall Use', 'Booking Cancellation', 'User Access', 'Password Reset', 'Record Payment', 'Customer Edit', 'Attendance Override', 'Deposit Refund', 'Expense', 'Repair Cost', 'Hall Block') NOT NULL,
   title VARCHAR(200) NOT NULL,
   detail TEXT NOT NULL,
   amount_label VARCHAR(64) NOT NULL,
   requester VARCHAR(100) NOT NULL,
   reference_no VARCHAR(64) NOT NULL,
   status ENUM('Pending', 'Approved', 'Rejected') NOT NULL DEFAULT 'Pending',
+  metadata_json JSON NULL,
   decided_by VARCHAR(64) NULL,
   decided_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP

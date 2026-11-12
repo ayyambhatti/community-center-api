@@ -20,14 +20,15 @@ router.get(
 router.post(
   "/check-in",
   asyncHandler(async (req, res) => {
-    const { latitude, longitude, dateISO } = req.body || {};
+    const { latitude, longitude, dateISO, overrideReason } = req.body || {};
     const settings = await getSystemSettings();
+    const isAdminActor = (req.user?.role || "").toLowerCase() === "admin";
 
     const lat = Number(latitude);
     const lon = Number(longitude);
     const hasCoords = Number.isFinite(lat) && Number.isFinite(lon);
 
-    if (settings.require_gps_for_check_in && !hasCoords) {
+    if (settings.require_gps_for_check_in && !hasCoords && !overrideReason) {
       return res.status(400).json({
         success: false,
         message: "Live GPS coordinates are required for attendance check-in.",
@@ -36,6 +37,7 @@ router.post(
 
     let distanceMeters = null;
     let withinFence = !settings.require_gps_for_check_in;
+    let needsOverrideApproval = false;
 
     if (hasCoords) {
       distanceMeters = calculateDistanceMeters(
@@ -46,14 +48,21 @@ router.post(
       );
       withinFence = isWithinGeofence(distanceMeters, Number(settings.geofence_radius_meters));
 
-      if (settings.require_gps_for_check_in && !withinFence) {
-        return res.status(403).json({
-          success: false,
-          message: `You are ${distanceMeters}m away from the community centre (allowed radius: ${settings.geofence_radius_meters}m).`,
-          distanceMeters,
-          radiusMeters: Number(settings.geofence_radius_meters),
-        });
+      if (settings.require_gps_for_check_in && !withinFence && !isAdminActor) {
+        if (overrideReason && Boolean(settings.require_attendance_override_admin_approval ?? 1)) {
+          needsOverrideApproval = true;
+        } else {
+          return res.status(403).json({
+            success: false,
+            canRequestOverride: Boolean(settings.require_attendance_override_admin_approval ?? 1),
+            message: `You are ${distanceMeters}m away from the community centre (allowed radius: ${settings.geofence_radius_meters}m). Provide an override reason to submit for Admin approval.`,
+            distanceMeters,
+            radiusMeters: Number(settings.geofence_radius_meters),
+          });
+        }
       }
+    } else if (settings.require_gps_for_check_in && overrideReason && !isAdminActor) {
+      needsOverrideApproval = true;
     }
 
     const todayISO = dateISO || new Date().toISOString().slice(0, 10);
@@ -68,8 +77,9 @@ router.post(
       await conn.execute(
         `INSERT INTO staff_attendance_logs (
           id, staff_id, user_id, date_iso, name, role_title,
-          check_in_time, check_out_time, geo_verified, distance_meters, latitude, longitude, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, '—', ?, ?, ?, ?, 'Present')`,
+          check_in_time, check_out_time, geo_verified, distance_meters, latitude, longitude,
+          status, approval_status, override_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, '—', ?, ?, ?, ?, 'Present', ?, ?)`,
         [
           id,
           req.user.id,
@@ -82,25 +92,51 @@ router.post(
           distanceMeters,
           hasCoords ? lat : null,
           hasCoords ? lon : null,
+          needsOverrideApproval ? "Pending" : "Approved",
+          overrideReason ? String(overrideReason).trim() : null,
         ]
       );
+
+      if (needsOverrideApproval) {
+        await conn.execute(
+          `INSERT INTO approvals (id, type, title, detail, amount_label, requester, reference_no, status, metadata_json)
+           VALUES (?, 'Attendance Override', ?, ?, ?, ?, ?, 'Pending', ?)`,
+          [
+            generateId("apr"),
+            `Attendance Override — ${req.user.name}`,
+            `${distanceMeters !== null ? `${distanceMeters}m from centre` : "GPS unavailable"} · Reason: ${String(overrideReason).trim()}`,
+            distanceMeters !== null ? `${distanceMeters}m` : "Off-site",
+            req.user.name || req.user.userId,
+            todayISO,
+            JSON.stringify({ logId: id, distanceMeters, overrideReason }),
+          ]
+        );
+      }
 
       await recordActivity(conn, {
         userLabel: req.user.name || req.user.userId,
         module: "Attendance",
-        action: "Staff check-in recorded",
-        detail: `${req.user.name} checked in at ${timeLabel}${distanceMeters !== null ? ` (${distanceMeters}m from centre)` : ""}`,
-        category: "Attendance",
-        alertTitle: `${req.user.name} Checked In`,
-        alertDetail: `Time: ${timeLabel}${distanceMeters !== null ? ` · GPS verified (${distanceMeters}m)` : ""}`,
-        href: "/attendance",
+        action: needsOverrideApproval
+          ? "Requested out-of-geofence attendance override"
+          : "Staff check-in recorded",
+        detail: `${req.user.name} checked in at ${timeLabel}${distanceMeters !== null ? ` (${distanceMeters}m from centre)` : ""}${overrideReason ? ` · Override: ${overrideReason}` : ""}`,
+        category: needsOverrideApproval ? "Approvals" : "Attendance",
+        alertTitle: needsOverrideApproval
+          ? `Attendance Override Approval Needed — ${req.user.name}`
+          : `${req.user.name} Checked In`,
+        alertDetail: `Time: ${timeLabel}${distanceMeters !== null ? ` · ${distanceMeters}m from centre` : ""}`,
+        href: needsOverrideApproval ? "/approvals" : "/attendance",
       });
 
       const [rows] = await conn.execute("SELECT * FROM staff_attendance_logs WHERE id = ? LIMIT 1", [id]);
       return mapStaffAttendanceLog(rows[0]);
     });
 
-    res.status(201).json({ success: true, log });
+    res.status(needsOverrideApproval ? 202 : 201).json({
+      success: true,
+      pendingApproval: needsOverrideApproval,
+      log,
+    });
   })
 );
 

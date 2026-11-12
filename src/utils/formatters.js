@@ -54,6 +54,9 @@ function mapSystemSettings(row) {
     requireExpenseAdminApproval: Boolean(row.require_expense_admin_approval ?? true),
     requireRefundAdminApproval: Boolean(row.require_refund_admin_approval ?? true),
     requireRepairAdminApproval: Boolean(row.require_repair_admin_approval ?? true),
+    requirePaymentAdminApproval: Boolean(row.require_payment_admin_approval ?? true),
+    requireCustomerEditAdminApproval: Boolean(row.require_customer_edit_admin_approval ?? true),
+    requireAttendanceOverrideAdminApproval: Boolean(row.require_attendance_override_admin_approval ?? true),
   };
 }
 
@@ -116,6 +119,7 @@ function mapPayment(row) {
     mode: row.mode,
     reference: row.reference,
     dateLabel: row.date_label,
+    status: row.status || "Approved",
   };
 }
 
@@ -224,6 +228,8 @@ function mapStaffAttendanceLog(row) {
     geoVerified: Boolean(row.geo_verified),
     distanceMeters: row.distance_meters !== null ? Number(row.distance_meters) : null,
     status: row.status,
+    approvalStatus: row.approval_status || "Approved",
+    overrideReason: row.override_reason || undefined,
   };
 }
 

@@ -173,6 +173,61 @@ router.patch(
           nextTicketStatus,
           current.reference_no,
         ]);
+      } else if (current.type === "Record Payment") {
+        const meta = current.metadata_json
+          ? typeof current.metadata_json === "string"
+            ? JSON.parse(current.metadata_json)
+            : current.metadata_json
+          : null;
+        if (meta?.paymentId) {
+          await conn.execute("UPDATE payments SET status = ? WHERE id = ?", [status, meta.paymentId]);
+          if (status === "Approved" && meta.bookingId && meta.amount) {
+            await conn.execute("UPDATE bookings SET paid = paid + ? WHERE id = ?", [
+              Number(meta.amount),
+              meta.bookingId,
+            ]);
+          }
+        }
+      } else if (current.type === "Customer Edit" && status === "Approved") {
+        const meta = current.metadata_json
+          ? typeof current.metadata_json === "string"
+            ? JSON.parse(current.metadata_json)
+            : current.metadata_json
+          : null;
+        if (meta?.applicantId && meta?.updates) {
+          const u = meta.updates;
+          await conn.execute(
+            `UPDATE applicants
+             SET name = COALESCE(?, name),
+                 phone = COALESCE(?, phone),
+                 address = COALESCE(?, address),
+                 id_proof_masked = COALESCE(?, id_proof_masked),
+                 notes = COALESCE(?, notes),
+                 preferences_json = COALESCE(?, preferences_json)
+             WHERE id = ?`,
+            [
+              u.name ?? null,
+              u.phone ?? null,
+              u.address ?? null,
+              u.idProofMasked ?? null,
+              u.notes ?? null,
+              u.preferences ? JSON.stringify(u.preferences) : null,
+              meta.applicantId,
+            ]
+          );
+        }
+      } else if (current.type === "Attendance Override") {
+        const meta = current.metadata_json
+          ? typeof current.metadata_json === "string"
+            ? JSON.parse(current.metadata_json)
+            : current.metadata_json
+          : null;
+        if (meta?.logId) {
+          await conn.execute(
+            "UPDATE staff_attendance_logs SET approval_status = ?, geo_verified = ? WHERE id = ?",
+            [status, status === "Approved" ? 1 : 0, meta.logId]
+          );
+        }
       }
 
       await recordActivity(conn, {
@@ -381,7 +436,10 @@ router.put(
           require_user_admin_approval = ?,
           require_expense_admin_approval = ?,
           require_refund_admin_approval = ?,
-          require_repair_admin_approval = ?
+          require_repair_admin_approval = ?,
+          require_payment_admin_approval = ?,
+          require_customer_edit_admin_approval = ?,
+          require_attendance_override_admin_approval = ?
          WHERE id = 1`,
         [
           body.centreName ?? current.centre_name,
@@ -402,6 +460,9 @@ router.put(
           boolVal(body.requireExpenseAdminApproval, current.require_expense_admin_approval ?? 1),
           boolVal(body.requireRefundAdminApproval, current.require_refund_admin_approval ?? 1),
           boolVal(body.requireRepairAdminApproval, current.require_repair_admin_approval ?? 1),
+          boolVal(body.requirePaymentAdminApproval, current.require_payment_admin_approval ?? 1),
+          boolVal(body.requireCustomerEditAdminApproval, current.require_customer_edit_admin_approval ?? 1),
+          boolVal(body.requireAttendanceOverrideAdminApproval, current.require_attendance_override_admin_approval ?? 1),
         ]
       );
 

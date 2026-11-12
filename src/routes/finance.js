@@ -2,7 +2,7 @@ const express = require("express");
 const { query, withTransaction } = require("../config/db");
 const { requireAuth } = require("../middleware/auth");
 const { asyncHandler } = require("../middleware/errorHandler");
-const { generateId, recordActivity } = require("../utils/audit");
+const { generateId, getSystemSettings, recordActivity } = require("../utils/audit");
 const { mapPayment, mapExpense, mapDepositRefund } = require("../utils/formatters");
 
 const router = express.Router();
@@ -25,7 +25,10 @@ router.post(
       return res.status(400).json({ success: false, message: "Valid bookingId and positive amount are required." });
     }
 
+    const isAdminActor = (req.user?.role || "").toLowerCase() === "admin";
+
     const created = await withTransaction(async (conn) => {
+      const settings = await getSystemSettings(conn);
       const [bookings] = await conn.execute("SELECT * FROM bookings WHERE id = ? LIMIT 1", [bookingId]);
       const booking = bookings[0];
       if (!booking) {
@@ -34,6 +37,8 @@ router.post(
         throw err;
       }
 
+      const needsApproval = !isAdminActor && Boolean(settings.require_payment_admin_approval ?? 1);
+      const payStatus = needsApproval ? "Pending" : "Approved";
       const id = generateId("pay");
       const receiptNo = `REC-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
       const label = dateLabel || new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
@@ -41,8 +46,8 @@ router.post(
       await conn.execute(
         `INSERT INTO payments (
           id, receipt_no, booking_id, booking_receipt_no, applicant_name,
-          event_title, type, amount, mode, reference, date_label
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          event_title, type, amount, mode, reference, date_label, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           receiptNo,
@@ -55,27 +60,50 @@ router.post(
           mode,
           reference,
           label,
+          payStatus,
         ]
       );
 
-      await conn.execute("UPDATE bookings SET paid = paid + ? WHERE id = ?", [numAmount, booking.id]);
+      if (!needsApproval) {
+        await conn.execute("UPDATE bookings SET paid = paid + ? WHERE id = ?", [numAmount, booking.id]);
+      } else {
+        await conn.execute(
+          `INSERT INTO approvals (id, type, title, detail, amount_label, requester, reference_no, status, metadata_json)
+           VALUES (?, 'Record Payment', ?, ?, ?, ?, ?, 'Pending', ?)`,
+          [
+            generateId("apr"),
+            `Payment ${type} — #${booking.receipt_no}`,
+            `${booking.applicant_name} · ${mode}${reference ? ` (Ref: ${reference})` : ""}`,
+            `₹${numAmount.toLocaleString("en-IN")}`,
+            req.user.name || req.user.userId,
+            receiptNo,
+            JSON.stringify({ paymentId: id, bookingId: booking.id, amount: numAmount }),
+          ]
+        );
+      }
 
       await recordActivity(conn, {
         userLabel: req.user.name || req.user.role,
         module: "Payment",
-        action: `Recorded ${type} ₹${numAmount.toLocaleString("en-IN")}`,
+        action: `Recorded ${type} ₹${numAmount.toLocaleString("en-IN")}${needsApproval ? " (Pending Admin approval)" : ""}`,
         detail: `Receipt ${receiptNo} for #${booking.receipt_no} (${booking.applicant_name}, ${mode})`,
-        category: "Money",
-        alertTitle: `Payment Received — ₹${numAmount.toLocaleString("en-IN")}`,
+        category: needsApproval ? "Approvals" : "Money",
+        alertTitle: needsApproval
+          ? `Payment Approval Needed — ₹${numAmount.toLocaleString("en-IN")}`
+          : `Payment Received — ₹${numAmount.toLocaleString("en-IN")}`,
         alertDetail: `${booking.applicant_name} (#${booking.receipt_no} · ${mode})`,
-        href: "/payments",
+        href: needsApproval ? "/approvals" : "/payments",
       });
 
       const [rows] = await conn.execute("SELECT * FROM payments WHERE id = ? LIMIT 1", [id]);
-      return mapPayment(rows[0]);
+      return { payment: mapPayment(rows[0]), pendingApproval: needsApproval };
     });
 
-    res.status(201).json({ success: true, payment: created });
+    res.status(created.pendingApproval ? 202 : 201).json({
+      success: true,
+      pendingApproval: created.pendingApproval,
+      payment: created.payment,
+    });
   })
 );
 

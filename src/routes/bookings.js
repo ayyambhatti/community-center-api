@@ -329,30 +329,81 @@ router.patch(
   "/applicants/:id",
   asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const rows = await query("SELECT * FROM applicants WHERE id = ? LIMIT 1", [id]);
-    const existing = rows[0];
-    if (!existing) {
-      return res.status(404).json({ success: false, message: "Customer not found" });
-    }
-
     const body = req.body || {};
-    await query(
-      `UPDATE applicants
-       SET name = ?, phone = ?, address = ?, id_proof_masked = ?, notes = ?, preferences_json = ?
-       WHERE id = ?`,
-      [
-        body.name ?? existing.name,
-        body.phone ?? existing.phone,
-        body.address ?? existing.address,
-        body.idProofMasked ?? existing.id_proof_masked,
-        body.notes ?? existing.notes,
-        body.preferences ? JSON.stringify(body.preferences) : existing.preferences_json,
-        id,
-      ]
-    );
+    const isAdminActor = (req.user?.role || "").toLowerCase() === "admin";
 
-    const updated = await query("SELECT * FROM applicants WHERE id = ? LIMIT 1", [id]);
-    res.json({ success: true, applicant: mapApplicant(updated[0]) });
+    const result = await withTransaction(async (conn) => {
+      const settings = await getSystemSettings(conn);
+      const [rows] = await conn.execute("SELECT * FROM applicants WHERE id = ? LIMIT 1", [id]);
+      const existing = rows[0];
+      if (!existing) {
+        const err = new Error("Customer not found");
+        err.statusCode = 404;
+        throw err;
+      }
+
+      const needsApproval = !isAdminActor && Boolean(settings.require_customer_edit_admin_approval ?? 1);
+      if (needsApproval) {
+        const updates = {
+          name: body.name ?? existing.name,
+          phone: body.phone ?? existing.phone,
+          address: body.address ?? existing.address,
+          idProofMasked: body.idProofMasked ?? existing.id_proof_masked,
+          notes: body.notes ?? existing.notes,
+          preferences: body.preferences ?? undefined,
+        };
+
+        await conn.execute(
+          `INSERT INTO approvals (id, type, title, detail, amount_label, requester, reference_no, status, metadata_json)
+           VALUES (?, 'Customer Edit', ?, ?, 'Profile Edit', ?, ?, 'Pending', ?)`,
+          [
+            generateId("apr"),
+            `Edit Customer — ${existing.name}`,
+            `Proposed changes for ${existing.customer_code || existing.id} (${updates.phone})`,
+            req.user.name || req.user.userId,
+            existing.customer_code || existing.id,
+            JSON.stringify({ applicantId: id, updates }),
+          ]
+        );
+
+        await recordActivity(conn, {
+          userLabel: req.user.name || req.user.role,
+          module: "Booking",
+          action: `Requested customer edit (${existing.name})`,
+          detail: `Changes sent for Admin approval (${updates.phone})`,
+          category: "Approvals",
+          alertTitle: `Customer Edit Approval Needed — ${existing.name}`,
+          alertDetail: `Requested by ${req.user.name || req.user.role}`,
+          href: "/approvals",
+        });
+
+        return { applicant: mapApplicant(existing), pendingApproval: true };
+      }
+
+      await conn.execute(
+        `UPDATE applicants
+         SET name = ?, phone = ?, address = ?, id_proof_masked = ?, notes = ?, preferences_json = ?
+         WHERE id = ?`,
+        [
+          body.name ?? existing.name,
+          body.phone ?? existing.phone,
+          body.address ?? existing.address,
+          body.idProofMasked ?? existing.id_proof_masked,
+          body.notes ?? existing.notes,
+          body.preferences ? JSON.stringify(body.preferences) : existing.preferences_json,
+          id,
+        ]
+      );
+
+      const [updated] = await conn.execute("SELECT * FROM applicants WHERE id = ? LIMIT 1", [id]);
+      return { applicant: mapApplicant(updated[0]), pendingApproval: false };
+    });
+
+    res.status(result.pendingApproval ? 202 : 200).json({
+      success: true,
+      pendingApproval: result.pendingApproval,
+      applicant: result.applicant,
+    });
   })
 );
 
