@@ -308,7 +308,7 @@ router.patch(
   requireRole("Admin"),
   asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { name, role, active, password, approvalStatus } = req.body || {};
+    const { name, userId, role, active, password, approvalStatus } = req.body || {};
 
     const updated = await withTransaction(async (conn) => {
       const [rows] = await conn.execute("SELECT * FROM users WHERE id = ? LIMIT 1", [id]);
@@ -325,6 +325,10 @@ router.patch(
         throw err;
       }
 
+      const nextUserId =
+        typeof userId === "string" && userId.trim()
+          ? userId.trim().toLowerCase()
+          : current.user_id;
       const nextHash = password ? await bcrypt.hash(password, 10) : current.password_hash;
       const nextApproval = approvalStatus || current.approval_status;
       const nextActive =
@@ -338,16 +342,45 @@ router.patch(
 
       await conn.execute(
         `UPDATE users
-         SET name = ?, role = ?, active = ?, password_hash = ?, approval_status = ?,
-             approved_by = COALESCE(approved_by, ?)
+         SET user_id = ?, name = ?, role = ?, active = ?, password_hash = ?, approval_status = ?,
+             approved_by = COALESCE(approved_by, ?),
+             approved_at = CASE WHEN ? = 'Approved' AND approved_at IS NULL THEN NOW() ELSE approved_at END
          WHERE id = ?`,
-        [name ?? current.name, role ?? current.role, nextActive, nextHash, nextApproval, req.user.userId, id]
+        [
+          nextUserId,
+          name ?? current.name,
+          role ?? current.role,
+          nextActive,
+          nextHash,
+          nextApproval,
+          req.user.userId,
+          nextApproval,
+          id,
+        ]
       );
+
+      if (approvalStatus && ["Approved", "Rejected"].includes(approvalStatus)) {
+        await conn.execute(
+          `UPDATE approvals
+           SET status = ?, decided_by = ?, decided_at = NOW()
+           WHERE type = 'User Access' AND status = 'Pending' AND LOWER(reference_no) = LOWER(?)`,
+          [approvalStatus, req.user.name || req.user.userId, current.user_id]
+        );
+      }
+
+      if (password) {
+        await conn.execute(
+          `UPDATE approvals
+           SET status = 'Approved', decided_by = ?, decided_at = NOW()
+           WHERE type = 'Password Reset' AND status = 'Pending' AND LOWER(reference_no) = LOWER(?)`,
+          [req.user.name || req.user.userId, current.user_id]
+        );
+      }
 
       await recordActivity(conn, {
         userLabel: req.user.name || "Admin",
         module: "User",
-        action: `Updated user "${current.user_id}"`,
+        action: `Updated user "${nextUserId}"`,
         detail: `${name ?? current.name} (${role ?? current.role}) · ${nextActive ? "Active" : "Disabled"} · ${nextApproval}${password ? " · Password updated" : ""}`,
         category: "Approvals",
         href: "/users",
