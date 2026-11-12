@@ -113,6 +113,14 @@ router.put(
 
 // --- Admin-Only Central Approval Queue ---
 
+router.get(
+  "/approvals",
+  asyncHandler(async (req, res) => {
+    const rows = await query("SELECT * FROM approvals ORDER BY created_at DESC");
+    res.json({ success: true, approvals: rows.map(mapApproval) });
+  })
+);
+
 router.patch(
   "/approvals/:id",
   requireRole("Admin"),
@@ -140,10 +148,10 @@ router.patch(
       // Cascade Admin approval decision to target record
       if (current.type === "Booking" || current.type === "Free Hall Use") {
         const nextBookingStatus = status === "Approved" ? "Confirmed" : "Cancelled";
-        await conn.execute("UPDATE bookings SET status = ? WHERE receipt_no = ?", [
-          nextBookingStatus,
-          current.reference_no,
-        ]);
+        await conn.execute(
+          "UPDATE bookings SET status = ?, cancellation_reason = CASE WHEN ? = 'Rejected' THEN 'Rejected by Admin' ELSE cancellation_reason END WHERE receipt_no = ?",
+          [nextBookingStatus, status, current.reference_no]
+        );
       } else if (current.type === "Booking Cancellation") {
         if (status === "Approved") {
           await conn.execute("UPDATE bookings SET status = 'Cancelled' WHERE receipt_no = ?", [

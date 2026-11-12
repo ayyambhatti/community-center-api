@@ -41,7 +41,7 @@ router.post(
       eventType = "Wedding",
       applicantId,
       applicantName,
-      phone,
+      phone = "",
       hall = "Ground Floor",
       isAC = false,
       dateISO,
@@ -57,10 +57,10 @@ router.post(
       paymentMode = "Cash",
     } = body;
 
-    if (!eventTitle || !applicantName || !phone || !dateISO || !timing) {
+    if (!eventTitle || !applicantName || !dateISO || !timing) {
       return res.status(400).json({
         success: false,
-        message: "Event title, applicant name, phone, date, and timing are required.",
+        message: "Event title, applicant name, date, and timing are required.",
       });
     }
 
@@ -93,9 +93,22 @@ router.post(
         throw err;
       }
 
-      const [countRows] = await conn.execute("SELECT COUNT(*) AS cnt FROM bookings");
-      const nextReceiptNo = body.receiptNo || String(1060 + Number(countRows[0].cnt || 0));
+      const [maxRows] = await conn.execute(
+        "SELECT MAX(CAST(receipt_no AS UNSIGNED)) AS max_no FROM bookings"
+      );
+      const nextNum = Math.max(1055, Number(maxRows[0]?.max_no || 0)) + 1;
+      const nextReceiptNo = body.receiptNo || String(nextNum);
       const bookingId = generateId("bk");
+
+      let resolvedApplicantId = null;
+      if (applicantId) {
+        const [appRows] = await conn.execute("SELECT id FROM applicants WHERE id = ? LIMIT 1", [
+          applicantId,
+        ]);
+        if (appRows[0]?.id) {
+          resolvedApplicantId = appRows[0].id;
+        }
+      }
 
       // Every non-Admin new booking (or Free Use booking) goes to Admin approval when enabled
       const needsApproval =
@@ -103,7 +116,11 @@ router.post(
         (Boolean(settings.require_booking_admin_approval ?? 1) ||
           Boolean(isFreeUse && settings.require_free_use_admin_approval));
 
-      const initialStatus = needsApproval ? "Awaiting approval" : body.status || "Confirmed";
+      const initialStatus = needsApproval
+        ? "Awaiting approval"
+        : isAdminActor
+        ? body.status || "Confirmed"
+        : "Pending";
       const depositStatus = isFreeUse || Number(deposit) <= 0 ? "N/A" : "Held";
 
       await conn.execute(
@@ -118,7 +135,7 @@ router.post(
           nextReceiptNo,
           eventTitle,
           eventType,
-          applicantId || null,
+          resolvedApplicantId,
           applicantName,
           phone,
           hall,
@@ -128,9 +145,9 @@ router.post(
           dateLabel || dateISO,
           timing,
           Number(guests || 0),
-          isFreeUse ? 0 : Number(rent),
-          isFreeUse ? 0 : Number(deposit),
-          isFreeUse ? 0 : Number(paid),
+          Number(rent || 0),
+          Number(deposit || 0),
+          Number(paid || 0),
           initialStatus,
           isFreeUse ? 1 : 0,
           notes || null,
@@ -141,7 +158,7 @@ router.post(
         ]
       );
 
-      if (Number(paid) > 0 && !isFreeUse) {
+      if (Number(paid) > 0) {
         const payReceipt = `REC-${new Date().getFullYear()}-${nextReceiptNo}`;
         await conn.execute(
           `INSERT INTO payments (
@@ -208,7 +225,10 @@ router.patch(
     const isAdminActor = (req.user?.role || "").toLowerCase() === "admin";
 
     const updated = await withTransaction(async (conn) => {
-      const [rows] = await conn.execute("SELECT * FROM bookings WHERE id = ? LIMIT 1", [id]);
+      const [rows] = await conn.execute(
+        "SELECT * FROM bookings WHERE id = ? OR receipt_no = ? LIMIT 1",
+        [id, id]
+      );
       const current = rows[0];
       if (!current) {
         const err = new Error("Booking not found");
@@ -216,8 +236,8 @@ router.patch(
         throw err;
       }
 
-      if (patch.status === "Confirmed" && current.status === "Awaiting approval" && !isAdminActor) {
-        const err = new Error("Only Admin can approve a pending booking.");
+      if (patch.status === "Confirmed" && current.status !== "Confirmed" && !isAdminActor) {
+        const err = new Error("Only Admin can approve or confirm bookings.");
         err.statusCode = 403;
         throw err;
       }
@@ -251,17 +271,82 @@ router.patch(
         return { booking: mapBooking(current), pendingApproval: true };
       }
 
+      const nextHall = patch.hall ?? current.hall;
+      const nextDateISO = patch.dateISO ?? current.date_iso;
+      const nextEndDateISO = patch.endDateISO !== undefined ? patch.endDateISO : current.end_date_iso;
       const nextStatus = patch.status ?? current.status;
+
+      if (nextStatus !== "Cancelled") {
+        const [existing] = await conn.execute(
+          "SELECT id, receipt_no, hall, date_iso, end_date_iso FROM bookings WHERE id <> ? AND status <> 'Cancelled'",
+          [current.id]
+        );
+        const conflict = existing.find(
+          (b) =>
+            datesOverlap(nextDateISO, nextEndDateISO, b.date_iso, b.end_date_iso) &&
+            hallsConflict(nextHall, b.hall)
+        );
+        if (conflict) {
+          const err = new Error(
+            `Hall "${nextHall}" is already booked for this date (Receipt #${conflict.receipt_no}).`
+          );
+          err.statusCode = 409;
+          throw err;
+        }
+      }
+
+      const nextIsFreeUse = patch.isFreeUse !== undefined ? (patch.isFreeUse ? 1 : 0) : current.is_free_use;
       const nextReason = patch.cancellationReason ?? current.cancellation_reason;
       const nextNotes = patch.notes ?? current.notes;
       const nextTiming = patch.timing ?? current.timing;
 
       await conn.execute(
         `UPDATE bookings
-         SET status = ?, cancellation_reason = ?, notes = ?, timing = ?
+         SET event_title = ?, event_type = ?, applicant_name = ?, phone = ?,
+             hall = ?, is_ac = ?, date_iso = ?, end_date_iso = ?, date_label = ?,
+             timing = ?, guests = ?, rent = ?, deposit = ?, paid = ?,
+             is_free_use = ?, payment_mode = ?, status = ?, cancellation_reason = ?, notes = ?
          WHERE id = ?`,
-        [nextStatus, nextReason || null, nextNotes || null, nextTiming, id]
+        [
+          patch.eventTitle ?? current.event_title,
+          patch.eventType ?? current.event_type,
+          patch.applicantName ?? current.applicant_name,
+          patch.phone ?? current.phone,
+          nextHall,
+          patch.isAC !== undefined ? (patch.isAC ? 1 : 0) : current.is_ac,
+          nextDateISO,
+          nextEndDateISO || null,
+          patch.dateLabel ?? current.date_label,
+          nextTiming,
+          patch.guests !== undefined ? Number(patch.guests) : current.guests,
+          patch.rent !== undefined ? Number(patch.rent) : current.rent,
+          patch.deposit !== undefined ? Number(patch.deposit) : current.deposit,
+          patch.paid !== undefined ? Number(patch.paid) : current.paid,
+          nextIsFreeUse,
+          patch.paymentMode ?? current.payment_mode,
+          nextStatus,
+          nextReason || null,
+          nextNotes || null,
+          current.id,
+        ]
       );
+
+      if (isAdminActor && nextStatus === "Confirmed") {
+        await conn.execute(
+          `UPDATE approvals
+           SET status = 'Approved', decided_by = ?, decided_at = NOW()
+           WHERE reference_no = ? AND type IN ('Booking', 'Free Hall Use') AND status = 'Pending'`,
+          [req.user.name || req.user.userId, current.receipt_no]
+        );
+      } else if (isAdminActor && nextStatus === "Cancelled") {
+        await conn.execute(
+          `UPDATE approvals
+           SET status = CASE WHEN type = 'Booking Cancellation' THEN 'Approved' ELSE 'Rejected' END,
+               decided_by = ?, decided_at = NOW()
+           WHERE reference_no = ? AND type IN ('Booking', 'Free Hall Use', 'Booking Cancellation') AND status = 'Pending'`,
+          [req.user.name || req.user.userId, current.receipt_no]
+        );
+      }
 
       await recordActivity(conn, {
         userLabel: req.user.name || req.user.role,
@@ -270,11 +355,11 @@ router.patch(
         detail: `Status: ${nextStatus}${nextReason ? ` (${nextReason})` : ""}`,
         category: "Bookings",
         alertTitle: `Booking #${current.receipt_no} Updated (${nextStatus})`,
-        alertDetail: `${current.event_title} · ${current.applicant_name}`,
-        href: `/bookings/${id}`,
+        alertDetail: `${patch.eventTitle ?? current.event_title} · ${patch.applicantName ?? current.applicant_name}`,
+        href: `/bookings/${current.receipt_no}`,
       });
 
-      const [after] = await conn.execute("SELECT * FROM bookings WHERE id = ? LIMIT 1", [id]);
+      const [after] = await conn.execute("SELECT * FROM bookings WHERE id = ? LIMIT 1", [current.id]);
       return { booking: mapBooking(after[0]), pendingApproval: false };
     });
 
@@ -297,9 +382,9 @@ router.get(
 router.post(
   "/applicants",
   asyncHandler(async (req, res) => {
-    const { name, phone, address = "", idProofMasked = "", notes = "", preferences = [] } = req.body || {};
-    if (!name || !phone) {
-      return res.status(400).json({ success: false, message: "Name and phone are required." });
+    const { name, phone = "", address = "", idProofMasked = "", notes = "", preferences = [] } = req.body || {};
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ success: false, message: "Customer name is required." });
     }
 
     const id = generateId("app");
