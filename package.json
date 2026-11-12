@@ -1,0 +1,29 @@
+{
+  "name": "community-center-api",
+  "version": "1.0.0",
+  "description": "Backend REST API for Haji Mohamed Yunus Valibhoy Community Centre (Dhari) - Node.js, Express, MySQL",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "db:init": "node scripts/init-db.js",
+    "check": "node scripts/syntax-check.js",
+    "test": "node scripts/smoke-test.js"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "mysql2": "^3.14.0"
+  }
+}
+
