@@ -37,25 +37,53 @@ async function run() {
     const healthJson = await healthRes.json();
     assert.strictEqual(healthJson.status, "OK");
 
-    // Unauthenticated access to protected route must return 401
+    // Login payload validation
+    const badLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "", password: "" }),
+    });
+    assert.strictEqual(badLoginRes.status, 400);
+
+    // Self-registration as Admin must be blocked (403)
+    const adminRegRes = await fetch(`${baseUrl}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "evil", name: "Evil", role: "Admin", password: "password123" }),
+    });
+    assert.strictEqual(adminRegRes.status, 403);
+
+    // Unauthenticated access to protected routes must return 401
     const unauthRes = await fetch(`${baseUrl}/api/bootstrap`);
     assert.strictEqual(unauthRes.status, 401);
 
-    // Non-admin JWT on admin-only route must return 403
+    // Non-admin JWT on Admin-only routes must return 403
     const managerToken = jwt.sign(
       { sub: "u-2", userId: "manager", name: "Centre Manager", role: "Manager" },
       process.env.JWT_SECRET
     );
-    const forbiddenRes = await fetch(`${baseUrl}/api/settings`, {
-      headers: { Authorization: `Bearer ${managerToken}` },
+    for (const protectedAdminPath of ["/api/settings", "/api/users"]) {
+      const forbiddenRes = await fetch(`${baseUrl}${protectedAdminPath}`, {
+        headers: { Authorization: `Bearer ${managerToken}` },
+      });
+      assert.strictEqual(forbiddenRes.status, 403);
+    }
+
+    const forbiddenPutPerm = await fetch(`${baseUrl}/api/permissions`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${managerToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ permissions: [] }),
     });
-    assert.strictEqual(forbiddenRes.status, 403);
+    assert.strictEqual(forbiddenPutPerm.status, 403);
 
     // Unknown route returns JSON 404
     const missingRes = await fetch(`${baseUrl}/api/non-existent-route`);
     assert.strictEqual(missingRes.status, 404);
 
-    console.log("[smoke-test] All HTTP, auth, RBAC, and geofence checks passed.");
+    console.log("[smoke-test] All HTTP, auth, registration guard, RBAC, and geofence checks passed.");
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await closePool();
@@ -66,4 +94,3 @@ run().catch((err) => {
   console.error("[smoke-test] Failed:", err);
   process.exit(1);
 });
-

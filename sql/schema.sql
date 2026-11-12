@@ -12,14 +12,29 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash VARCHAR(255) NOT NULL,
   last_login VARCHAR(64) NOT NULL DEFAULT 'Never',
   active TINYINT(1) NOT NULL DEFAULT 1,
+  approval_status ENUM('Pending', 'Approved', 'Rejected') NOT NULL DEFAULT 'Approved',
+  approved_by VARCHAR(64) NULL,
+  approved_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+  id VARCHAR(64) PRIMARY KEY,
+  role ENUM('Admin', 'Manager', 'Accountant', 'Staff') NOT NULL,
+  module VARCHAR(64) NOT NULL,
+  can_view TINYINT(1) NOT NULL DEFAULT 0,
+  can_create TINYINT(1) NOT NULL DEFAULT 0,
+  can_edit TINYINT(1) NOT NULL DEFAULT 0,
+  can_approve TINYINT(1) NOT NULL DEFAULT 0,
+  UNIQUE KEY uniq_role_module (role, module)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS system_settings (
   id TINYINT UNSIGNED PRIMARY KEY DEFAULT 1,
   centre_name VARCHAR(200) NOT NULL,
   centre_location VARCHAR(200) NOT NULL,
+  centre_phone VARCHAR(32) NOT NULL DEFAULT '',
   geofence_latitude DECIMAL(10, 7) NOT NULL,
   geofence_longitude DECIMAL(10, 7) NOT NULL,
   geofence_radius_meters INT NOT NULL DEFAULT 200,
@@ -28,7 +43,13 @@ CREATE TABLE IF NOT EXISTS system_settings (
   base_rent_per_floor INT NOT NULL DEFAULT 5000,
   ac_surcharge_per_floor INT NOT NULL DEFAULT 2000,
   default_security_deposit INT NOT NULL DEFAULT 15000,
+  max_upload_size_mb INT NOT NULL DEFAULT 5,
   require_free_use_admin_approval TINYINT(1) NOT NULL DEFAULT 1,
+  require_booking_admin_approval TINYINT(1) NOT NULL DEFAULT 1,
+  require_user_admin_approval TINYINT(1) NOT NULL DEFAULT 1,
+  require_expense_admin_approval TINYINT(1) NOT NULL DEFAULT 1,
+  require_refund_admin_approval TINYINT(1) NOT NULL DEFAULT 1,
+  require_repair_admin_approval TINYINT(1) NOT NULL DEFAULT 1,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -66,7 +87,7 @@ CREATE TABLE IF NOT EXISTS bookings (
   rent INT NOT NULL DEFAULT 0,
   deposit INT NOT NULL DEFAULT 0,
   paid INT NOT NULL DEFAULT 0,
-  status ENUM('Confirmed', 'Pending', 'Awaiting approval', 'Completed', 'Cancelled') NOT NULL DEFAULT 'Pending',
+  status ENUM('Confirmed', 'Pending', 'Awaiting approval', 'Completed', 'Cancelled') NOT NULL DEFAULT 'Awaiting approval',
   is_free_use TINYINT(1) NOT NULL DEFAULT 0,
   notes TEXT NULL,
   payment_mode ENUM('Cash', 'UPI', 'Bank Transfer', 'Cheque') NULL,
@@ -218,7 +239,7 @@ CREATE TABLE IF NOT EXISTS staff_attendance_logs (
 
 CREATE TABLE IF NOT EXISTS approvals (
   id VARCHAR(64) PRIMARY KEY,
-  type ENUM('Free Hall Use', 'Deposit Refund', 'Expense', 'Repair Cost') NOT NULL,
+  type ENUM('Booking', 'Free Hall Use', 'Booking Cancellation', 'User Access', 'Password Reset', 'Deposit Refund', 'Expense', 'Repair Cost', 'Hall Block') NOT NULL,
   title VARCHAR(200) NOT NULL,
   detail TEXT NOT NULL,
   amount_label VARCHAR(64) NOT NULL,
@@ -265,4 +286,3 @@ CREATE TABLE IF NOT EXISTS action_items (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 SET FOREIGN_KEY_CHECKS = 1;
-

@@ -2,7 +2,7 @@ const express = require("express");
 const { query, withTransaction } = require("../config/db");
 const { requireAuth } = require("../middleware/auth");
 const { asyncHandler } = require("../middleware/errorHandler");
-const { generateId, recordActivity } = require("../utils/audit");
+const { generateId, getSystemSettings, recordActivity } = require("../utils/audit");
 const { mapMaintenanceTicket, mapHallCheckItem, mapDepositRefund } = require("../utils/formatters");
 
 const router = express.Router();
@@ -32,12 +32,18 @@ router.post(
       return res.status(400).json({ success: false, message: "Ticket title is required." });
     }
 
+    const isAdminActor = (req.user?.role || "").toLowerCase() === "admin";
+
     const ticket = await withTransaction(async (conn) => {
+      const settings = await getSystemSettings(conn);
       const [countRows] = await conn.execute("SELECT COUNT(*) AS cnt FROM maintenance_tickets");
       const seq = String(115 + Number(countRows[0].cnt || 0)).padStart(4, "0");
       const ticketNo = `MC-${new Date().getFullYear()}-${seq}`;
       const id = generateId("mt");
       const dateLabel = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+
+      const needsApproval = !isAdminActor && Boolean(settings.require_repair_admin_approval ?? 1);
+      const initialStatus = needsApproval ? "Pending" : body.status || "Pending";
 
       await conn.execute(
         `INSERT INTO maintenance_tickets (
@@ -56,7 +62,7 @@ router.post(
           Number(estimatedCost || 0),
           req.user.name || req.user.userId,
           dateLabel,
-          body.status || "Pending",
+          initialStatus,
           description || null,
           JSON.stringify(Array.isArray(photos) ? photos : []),
           blockHall ? 1 : 0,
@@ -74,15 +80,31 @@ router.post(
         );
       }
 
+      if (needsApproval) {
+        await conn.execute(
+          `INSERT INTO approvals (id, type, title, detail, amount_label, requester, reference_no, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')`,
+          [
+            generateId("apr"),
+            blockHall ? "Hall Block" : "Repair Cost",
+            `${blockHall ? "Hall Block & Repair" : "Repair Request"} — ${title}`,
+            `${location} · ${category} (${priority})`,
+            `₹${Number(estimatedCost || 0).toLocaleString("en-IN")}`,
+            req.user.name || req.user.userId,
+            ticketNo,
+          ]
+        );
+      }
+
       await recordActivity(conn, {
         userLabel: req.user.name || req.user.role,
         module: "Maintenance",
         action: `Raised repair ticket ${ticketNo}`,
         detail: `${title} (${location}) · Est. ₹${Number(estimatedCost || 0).toLocaleString("en-IN")}`,
-        category: "Repairs",
+        category: needsApproval ? "Approvals" : "Repairs",
         alertTitle: `New Repair Ticket ${ticketNo}`,
         alertDetail: `${title} · ${location} (${priority})`,
-        href: "/maintenance",
+        href: needsApproval ? "/approvals" : "/maintenance",
       });
 
       const [rows] = await conn.execute("SELECT * FROM maintenance_tickets WHERE id = ? LIMIT 1", [id]);
@@ -101,6 +123,11 @@ router.patch(
     const { status } = req.body || {};
     if (!status) {
       return res.status(400).json({ success: false, message: "Status is required." });
+    }
+
+    const isAdminActor = (req.user?.role || "").toLowerCase() === "admin";
+    if (status === "Approved" && !isAdminActor) {
+      return res.status(403).json({ success: false, message: "Only Admin can mark a repair ticket Approved." });
     }
 
     const ticket = await withTransaction(async (conn) => {

@@ -72,6 +72,8 @@ router.post(
       });
     }
 
+    const isAdminActor = (req.user?.role || "").toLowerCase() === "admin";
+
     const created = await withTransaction(async (conn) => {
       const settings = await getSystemSettings(conn);
       const [existing] = await conn.execute(
@@ -94,7 +96,13 @@ router.post(
       const [countRows] = await conn.execute("SELECT COUNT(*) AS cnt FROM bookings");
       const nextReceiptNo = body.receiptNo || String(1060 + Number(countRows[0].cnt || 0));
       const bookingId = generateId("bk");
-      const needsApproval = Boolean(isFreeUse && settings.require_free_use_admin_approval);
+
+      // Every non-Admin new booking (or Free Use booking) goes to Admin approval when enabled
+      const needsApproval =
+        !isAdminActor &&
+        (Boolean(settings.require_booking_admin_approval ?? 1) ||
+          Boolean(isFreeUse && settings.require_free_use_admin_approval));
+
       const initialStatus = needsApproval ? "Awaiting approval" : body.status || "Confirmed";
       const depositStatus = isFreeUse || Number(deposit) <= 0 ? "N/A" : "Held";
 
@@ -158,11 +166,13 @@ router.post(
       if (needsApproval) {
         await conn.execute(
           `INSERT INTO approvals (id, type, title, detail, amount_label, requester, reference_no, status)
-           VALUES (?, 'Free Hall Use', ?, ?, '₹0 (Free Use)', ?, ?, 'Pending')`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')`,
           [
             generateId("apr"),
-            `Free Hall Request — ${eventTitle}`,
-            `${applicantName} (${hall}) on ${dateLabel || dateISO}`,
+            isFreeUse ? "Free Hall Use" : "Booking",
+            `${isFreeUse ? "Free Hall Request" : "New Booking"} — ${eventTitle}`,
+            `${applicantName} (${hall}) on ${dateLabel || dateISO} · ${timing}`,
+            isFreeUse ? "₹0 (Free Use)" : `₹${totalCharges.toLocaleString("en-IN")}`,
             req.user.name || req.user.userId,
             nextReceiptNo,
           ]
@@ -173,13 +183,13 @@ router.post(
         userLabel: req.user.name || req.user.role,
         module: "Booking",
         action: `Created booking #${nextReceiptNo}`,
-        detail: `${eventTitle} · ${applicantName} · ${hall} on ${dateLabel || dateISO}`,
+        detail: `${eventTitle} · ${applicantName} · ${hall} on ${dateLabel || dateISO}${needsApproval ? " (Awaiting Admin approval)" : ""}`,
         category: needsApproval ? "Approvals" : "Bookings",
         alertTitle: needsApproval
-          ? `Free Hall Approval Needed — #${nextReceiptNo}`
+          ? `Booking Approval Needed — #${nextReceiptNo}`
           : `New Booking #${nextReceiptNo} — ${eventTitle}`,
         alertDetail: `${applicantName} · ${hall} (${dateLabel || dateISO})`,
-        href: "/bookings",
+        href: needsApproval ? "/approvals" : "/bookings",
       });
 
       const [rows] = await conn.execute("SELECT * FROM bookings WHERE id = ? LIMIT 1", [bookingId]);
@@ -195,6 +205,7 @@ router.patch(
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     const patch = req.body || {};
+    const isAdminActor = (req.user?.role || "").toLowerCase() === "admin";
 
     const updated = await withTransaction(async (conn) => {
       const [rows] = await conn.execute("SELECT * FROM bookings WHERE id = ? LIMIT 1", [id]);
@@ -203,6 +214,41 @@ router.patch(
         const err = new Error("Booking not found");
         err.statusCode = 404;
         throw err;
+      }
+
+      if (patch.status === "Confirmed" && current.status === "Awaiting approval" && !isAdminActor) {
+        const err = new Error("Only Admin can approve a pending booking.");
+        err.statusCode = 403;
+        throw err;
+      }
+
+      // Non-Admin cancellation requests go to Admin approval before cancelling
+      if (patch.status === "Cancelled" && current.status !== "Awaiting approval" && !isAdminActor) {
+        await conn.execute(
+          `INSERT INTO approvals (id, type, title, detail, amount_label, requester, reference_no, status)
+           VALUES (?, 'Booking Cancellation', ?, ?, ?, ?, ?, 'Pending')`,
+          [
+            generateId("apr"),
+            `Cancel Booking #${current.receipt_no} — ${current.event_title}`,
+            `${current.applicant_name}${patch.cancellationReason ? ` · Reason: ${patch.cancellationReason}` : ""}`,
+            `₹${Number(current.rent || 0).toLocaleString("en-IN")}`,
+            req.user.name || req.user.userId,
+            current.receipt_no,
+          ]
+        );
+
+        await recordActivity(conn, {
+          userLabel: req.user.name || req.user.role,
+          module: "Booking",
+          action: `Requested cancellation for #${current.receipt_no}`,
+          detail: patch.cancellationReason || "Awaiting Admin approval",
+          category: "Approvals",
+          alertTitle: `Cancellation Approval Needed — #${current.receipt_no}`,
+          alertDetail: `${current.event_title} · ${current.applicant_name}`,
+          href: "/approvals",
+        });
+
+        return { booking: mapBooking(current), pendingApproval: true };
       }
 
       const nextStatus = patch.status ?? current.status;
@@ -229,10 +275,14 @@ router.patch(
       });
 
       const [after] = await conn.execute("SELECT * FROM bookings WHERE id = ? LIMIT 1", [id]);
-      return mapBooking(after[0]);
+      return { booking: mapBooking(after[0]), pendingApproval: false };
     });
 
-    res.json({ success: true, booking: updated });
+    res.status(updated.pendingApproval ? 202 : 200).json({
+      success: true,
+      pendingApproval: updated.pendingApproval,
+      booking: updated.booking,
+    });
   })
 );
 

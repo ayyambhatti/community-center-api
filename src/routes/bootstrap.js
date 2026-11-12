@@ -5,6 +5,7 @@ const { asyncHandler } = require("../middleware/errorHandler");
 const { getSystemSettings } = require("../utils/audit");
 const {
   mapUser,
+  mapRolePermission,
   mapSystemSettings,
   mapApplicant,
   mapBooking,
@@ -49,6 +50,7 @@ router.get(
       notificationRows,
       auditLogRows,
       actionItemRows,
+      permissionRows,
       usersRows,
     ] = await Promise.all([
       getSystemSettings(),
@@ -69,8 +71,9 @@ router.get(
         : query("SELECT * FROM notifications WHERE audience = 'all' ORDER BY created_at DESC LIMIT 100"),
       query("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 200"),
       query("SELECT * FROM action_items WHERE completed = 0 ORDER BY created_at ASC"),
+      query("SELECT * FROM role_permissions ORDER BY role ASC, module ASC"),
       isAdmin
-        ? query("SELECT id, user_id, name, role, last_login, active FROM users ORDER BY created_at ASC")
+        ? query("SELECT id, user_id, name, role, last_login, active, approval_status, approved_by FROM users ORDER BY created_at ASC")
         : Promise.resolve([]),
     ]);
 
@@ -109,6 +112,7 @@ router.get(
         notifications: notificationRows.map(mapNotification),
         auditLogs: auditLogRows.map(mapAuditLog),
         actionItems: actionItemRows.map(mapActionItem),
+        rolePermissions: permissionRows.map(mapRolePermission),
         users: usersRows.map(mapUser),
       },
     });
@@ -116,4 +120,3 @@ router.get(
 );
 
 module.exports = router;
-

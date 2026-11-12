@@ -21,6 +21,7 @@ async function getSystemSettings(conn = null) {
   return rows[0] || {
     centre_name: "Haji Mohamed Yunus Valibhoy Community Centre",
     centre_location: "Dhari, Gujarat, India",
+    centre_phone: "",
     geofence_latitude: 21.3250054,
     geofence_longitude: 71.0246248,
     geofence_radius_meters: 200,
@@ -29,7 +30,13 @@ async function getSystemSettings(conn = null) {
     base_rent_per_floor: 5000,
     ac_surcharge_per_floor: 2000,
     default_security_deposit: 15000,
+    max_upload_size_mb: 5,
     require_free_use_admin_approval: 1,
+    require_booking_admin_approval: 1,
+    require_user_admin_approval: 1,
+    require_expense_admin_approval: 1,
+    require_refund_admin_approval: 1,
+    require_repair_admin_approval: 1,
   };
 }
 
@@ -73,4 +80,3 @@ module.exports = {
   getSystemSettings,
   recordActivity,
 };
-

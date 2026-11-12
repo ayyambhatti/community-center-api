@@ -17,6 +17,20 @@ function mapUser(row) {
     role: row.role,
     lastLogin: row.last_login,
     active: Boolean(row.active),
+    approvalStatus: row.approval_status || "Approved",
+    approvedBy: row.approved_by || undefined,
+  };
+}
+
+function mapRolePermission(row) {
+  return {
+    id: row.id,
+    role: row.role,
+    module: row.module,
+    canView: Boolean(row.can_view),
+    canCreate: Boolean(row.can_create),
+    canEdit: Boolean(row.can_edit),
+    canApprove: Boolean(row.can_approve),
   };
 }
 
@@ -24,6 +38,7 @@ function mapSystemSettings(row) {
   return {
     centreName: row.centre_name,
     centreLocation: row.centre_location,
+    centrePhone: row.centre_phone || "",
     geofenceLatitude: Number(row.geofence_latitude),
     geofenceLongitude: Number(row.geofence_longitude),
     geofenceRadiusMeters: Number(row.geofence_radius_meters),
@@ -32,7 +47,13 @@ function mapSystemSettings(row) {
     baseRentPerFloor: Number(row.base_rent_per_floor),
     acSurchargePerFloor: Number(row.ac_surcharge_per_floor),
     defaultSecurityDeposit: Number(row.default_security_deposit),
+    maxUploadSizeMb: Number(row.max_upload_size_mb ?? 5),
     requireFreeUseAdminApproval: Boolean(row.require_free_use_admin_approval),
+    requireBookingAdminApproval: Boolean(row.require_booking_admin_approval ?? true),
+    requireUserAdminApproval: Boolean(row.require_user_admin_approval ?? true),
+    requireExpenseAdminApproval: Boolean(row.require_expense_admin_approval ?? true),
+    requireRefundAdminApproval: Boolean(row.require_refund_admin_approval ?? true),
+    requireRepairAdminApproval: Boolean(row.require_repair_admin_approval ?? true),
   };
 }
 
@@ -258,6 +279,7 @@ function mapActionItem(row) {
 
 module.exports = {
   mapUser,
+  mapRolePermission,
   mapSystemSettings,
   mapApplicant,
   mapBooking,
@@ -273,4 +295,3 @@ module.exports = {
   mapAuditLog,
   mapActionItem,
 };
-

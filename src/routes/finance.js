@@ -135,12 +135,20 @@ router.patch(
     const { id } = req.params;
     const patch = req.body || {};
 
+    const isAdminActor = (req.user?.role || "").toLowerCase() === "admin";
+
     const updated = await withTransaction(async (conn) => {
       const [rows] = await conn.execute("SELECT * FROM deposit_refunds WHERE id = ? LIMIT 1", [id]);
       const current = rows[0];
       if (!current) {
         const err = new Error("Deposit refund record not found");
         err.statusCode = 404;
+        throw err;
+      }
+
+      if (patch.status === "Refunded" && !isAdminActor) {
+        const err = new Error("Deposit payouts must be approved by Admin before marking Refunded.");
+        err.statusCode = 403;
         throw err;
       }
 
