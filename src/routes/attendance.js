@@ -97,6 +97,26 @@ router.post(
         ]
       );
 
+      // Update live staff_attendance register for today
+      const [existingStaff] = await conn.execute(
+        "SELECT id FROM staff_attendance WHERE name = ? OR id = ? LIMIT 1",
+        [req.user.name, req.user.id]
+      );
+      if (existingStaff.length > 0) {
+        await conn.execute(
+          `UPDATE staff_attendance
+           SET check_in_time = ?, check_out_time = '—', geo_verified = ?, status = 'Present', present_days = present_days + 1
+           WHERE id = ?`,
+          [timeLabel, withinFence ? 1 : 0, existingStaff[0].id]
+        );
+      } else {
+        await conn.execute(
+          `INSERT INTO staff_attendance (id, name, role_title, check_in_time, check_out_time, geo_verified, status, present_days)
+           VALUES (?, ?, ?, ?, '—', ?, 'Present', 1)`,
+          [req.user.id, req.user.name, req.user.role, timeLabel, withinFence ? 1 : 0]
+        );
+      }
+
       if (needsOverrideApproval) {
         await conn.execute(
           `INSERT INTO approvals (id, type, title, detail, amount_label, requester, reference_no, status, metadata_json)
@@ -173,6 +193,11 @@ router.post(
         timeLabel,
         targetRow.id,
       ]);
+
+      await conn.execute(
+        "UPDATE staff_attendance SET check_out_time = ? WHERE name = ? OR id = ?",
+        [timeLabel, targetRow.name, targetRow.staff_id]
+      );
 
       await recordActivity(conn, {
         userLabel: req.user.name || req.user.userId,
