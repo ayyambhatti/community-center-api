@@ -6,9 +6,15 @@ function parseOrigins(raw) {
     .filter(Boolean);
 }
 
+function parsePort(raw) {
+  if (!raw) return 4000;
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : raw;
+}
+
 const env = {
   nodeEnv: process.env.NODE_ENV || "development",
-  port: Number(process.env.PORT || 4000),
+  port: parsePort(process.env.PORT),
   db: {
     host: process.env.DB_HOST || "127.0.0.1",
     port: Number(process.env.DB_PORT || 3306),
