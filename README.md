@@ -19,6 +19,15 @@ Backend REST API for **Haji Mohamed Yunus Valibhoy Community Centre (Dhari)** bu
 
 ---
 
+## Production API Status
+
+- **Live URL:** `https://api.hmyvalibhoycc-dhari.com`
+- **Health Check:** `https://api.hmyvalibhoycc-dhari.com/api/health`
+- **SSL:** Let's Encrypt (Active)
+- **CI/CD:** Automated via GitHub Actions on push to `main`
+
+---
+
 ## Local Development
 
 ```bash
