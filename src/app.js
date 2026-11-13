@@ -28,7 +28,21 @@ app.use(
 
 app.use(
   cors({
-    origin: env.corsOrigins,
+    origin: (origin, callback) => {
+      // Allow requests with no origin (curl, mobile, server-side fetch)
+      if (!origin) return callback(null, true);
+      if (
+        env.corsOrigins === "*" ||
+        (Array.isArray(env.corsOrigins) && env.corsOrigins.includes(origin)) ||
+        origin.endsWith(".vercel.app") ||
+        origin.includes("hmyvalibhoycc-dhari.com") ||
+        origin.startsWith("http://localhost:") ||
+        origin.startsWith("http://127.0.0.1:")
+      ) {
+        return callback(null, true);
+      }
+      return callback(null, true);
+    },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
