@@ -5,3 +5,4 @@ deployment:
     - /bin/cp -r src sql scripts package.json server.js $DEPLOYPATH
     - /usr/sbin/cloudlinux-selector install-modules --interpreter nodejs --app-root api.hmyvalibhoycc-dhari.com
     - /usr/sbin/cloudlinux-selector restart --interpreter nodejs --app-root api.hmyvalibhoycc-dhari.com
+

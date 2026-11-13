@@ -34,13 +34,10 @@ jobs:
 
     steps:
       - name: Deploy to cPanel via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST || 's670.bom1.mysecurecloudhost.com' }}
-          username: ${{ secrets.SERVER_USER || 'hmyvalib' }}
-          password: ${{ secrets.SERVER_PASSWORD }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT || 22 }}
-          script: |
-            /home/hmyvalib/deploy-api.sh
+        env:
+          SSHPASS: ${{ secrets.SERVER_PASSWORD }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+          sshpass -e ssh -o StrictHostKeyChecking=no -p 22 hmyvalib@s670.bom1.mysecurecloudhost.com "/home/hmyvalib/deploy-api.sh"
+
 
