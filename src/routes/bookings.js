@@ -64,6 +64,14 @@ router.post(
       });
     }
 
+    const todayISO = new Date().toISOString().slice(0, 10);
+    if (dateISO < todayISO) {
+      return res.status(400).json({
+        success: false,
+        message: "Bookings cannot be scheduled for past dates. Please select today or a future date.",
+      });
+    }
+
     const totalCharges = Number(rent) + Number(deposit);
     if (Number(paid) < 0 || (!isFreeUse && Number(paid) > totalCharges)) {
       return res.status(400).json({
