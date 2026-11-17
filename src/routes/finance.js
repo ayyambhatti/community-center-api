@@ -29,7 +29,10 @@ router.post(
 
     const created = await withTransaction(async (conn) => {
       const settings = await getSystemSettings(conn);
-      const [bookings] = await conn.execute("SELECT * FROM bookings WHERE id = ? LIMIT 1", [bookingId]);
+      const [bookings] = await conn.execute(
+        "SELECT * FROM bookings WHERE id = ? OR receipt_no = ? LIMIT 1",
+        [bookingId, bookingId]
+      );
       const booking = bookings[0];
       if (!booking) {
         const err = new Error("Booking not found");
@@ -107,6 +110,14 @@ router.post(
   })
 );
 
+router.get(
+  "/expenses",
+  asyncHandler(async (req, res) => {
+    const rows = await query("SELECT * FROM expenses ORDER BY created_at DESC");
+    res.json({ success: true, expenses: rows.map(mapExpense) });
+  })
+);
+
 router.post(
   "/expenses",
   asyncHandler(async (req, res) => {
@@ -157,6 +168,95 @@ router.post(
   })
 );
 
+router.get(
+  "/deposit-refunds",
+  asyncHandler(async (req, res) => {
+    const [refundsRows, deductionRows] = await Promise.all([
+      query("SELECT * FROM deposit_refunds ORDER BY created_at DESC"),
+      query("SELECT * FROM deposit_deduction_items"),
+    ]);
+    const deductionsByRefund = new Map();
+    for (const item of deductionRows) {
+      const list = deductionsByRefund.get(item.refund_id) || [];
+      list.push(item);
+      deductionsByRefund.set(item.refund_id, list);
+    }
+    res.json({
+      success: true,
+      depositRefunds: refundsRows.map((r) =>
+        mapDepositRefund(r, deductionsByRefund.get(r.id) || [])
+      ),
+    });
+  })
+);
+
+router.get(
+  "/deposit-refunds/:id",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const [refundRows, deductionRows] = await Promise.all([
+      query("SELECT * FROM deposit_refunds WHERE id = ? OR booking_receipt_no = ? LIMIT 1", [id, id]),
+      query("SELECT * FROM deposit_deduction_items WHERE refund_id = ?", [id]),
+    ]);
+    if (!refundRows.length) {
+      return res.status(404).json({ success: false, message: "Deposit refund record not found" });
+    }
+    res.json({ success: true, depositRefund: mapDepositRefund(refundRows[0], deductionRows) });
+  })
+);
+
+router.post(
+  "/deposit-refunds",
+  asyncHandler(async (req, res) => {
+    const {
+      bookingReceiptNo,
+      applicantName,
+      eventTitle,
+      eventDate,
+      heldAmount = 0,
+      deductionAmount = 0,
+      deductionNote = "",
+      refundMode = "UPI",
+      status = "Ready to Refund",
+      upiOrAccount = "",
+      remarks = "",
+    } = req.body || {};
+    if (!bookingReceiptNo) {
+      return res.status(400).json({ success: false, message: "bookingReceiptNo is required." });
+    }
+    const id = generateId("ref");
+    await query(
+      `INSERT INTO deposit_refunds (
+        id, booking_receipt_no, applicant_name, event_title, event_date,
+        held_amount, deduction_amount, deduction_note, refund_mode, status, upi_or_account, remarks
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        deduction_amount = VALUES(deduction_amount),
+        deduction_note = VALUES(deduction_note),
+        status = VALUES(status)`,
+      [
+        id,
+        bookingReceiptNo,
+        applicantName || "",
+        eventTitle || "",
+        eventDate || "",
+        Number(heldAmount || 0),
+        Number(deductionAmount || 0),
+        deductionNote,
+        refundMode,
+        status,
+        upiOrAccount,
+        remarks,
+      ]
+    );
+    const rows = await query(
+      "SELECT * FROM deposit_refunds WHERE id = ? OR booking_receipt_no = ? LIMIT 1",
+      [id, bookingReceiptNo]
+    );
+    res.status(201).json({ success: true, depositRefund: mapDepositRefund(rows[0], []) });
+  })
+);
+
 router.patch(
   "/deposit-refunds/:id",
   asyncHandler(async (req, res) => {
@@ -166,7 +266,10 @@ router.patch(
     const isAdminActor = (req.user?.role || "").toLowerCase() === "admin";
 
     const updated = await withTransaction(async (conn) => {
-      const [rows] = await conn.execute("SELECT * FROM deposit_refunds WHERE id = ? LIMIT 1", [id]);
+      const [rows] = await conn.execute(
+        "SELECT * FROM deposit_refunds WHERE id = ? OR booking_receipt_no = ? LIMIT 1",
+        [id, id]
+      );
       const current = rows[0];
       if (!current) {
         const err = new Error("Deposit refund record not found");

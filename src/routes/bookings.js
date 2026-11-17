@@ -32,6 +32,21 @@ router.get(
   })
 );
 
+router.get(
+  "/bookings/:id",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const rows = await query(
+      "SELECT * FROM bookings WHERE id = ? OR receipt_no = ? LIMIT 1",
+      [id, id]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: "Booking not found" });
+    }
+    res.json({ success: true, booking: mapBooking(rows[0]) });
+  })
+);
+
 router.post(
   "/bookings",
   asyncHandler(async (req, res) => {
