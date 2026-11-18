@@ -52,13 +52,14 @@ INSERT INTO system_settings (
 ) ON DUPLICATE KEY UPDATE id = id;
 
 INSERT INTO hall_check_items (id, label, helper, status, issue_cost, note) VALUES
-  ('chk-1', 'Main Hall Lighting & Chandeliers', 'Check all switches, bulbs, and emergency backup lights', 'OK', 0, ''),
-  ('chk-2', 'Air Conditioning & Fans', 'Verify AC cooling and ceiling fans on Ground and First Floor', 'OK', 0, ''),
-  ('chk-3', 'Washrooms & Water Supply', 'Inspect taps, flush tanks, drainage, and cleanliness', 'OK', 0, ''),
-  ('chk-4', 'Kitchen & Dining Area', 'Check gas connections, sinks, and waste bins', 'OK', 0, ''),
-  ('chk-5', 'Sound System & Microphones', 'Test amplifier, speakers, and wireless mics', 'OK', 0, ''),
-  ('chk-6', 'Chairs, Tables & Stage Furniture', 'Confirm count and inspect for broken legs or upholstery tears', 'OK', 0, '')
-ON DUPLICATE KEY UPDATE id = id;
+  ('chk-1', 'Chairs & tables count', 'Counted & unbroken (seating rows)', 'OK', 0, ''),
+  ('chk-2', 'Lights & electrical', 'All panels, switches & sockets', 'OK', 0, ''),
+  ('chk-3', 'Fans & air conditioning', 'Fans, AC units & remotes returned', 'OK', 0, ''),
+  ('chk-4', 'Sound system & stage', 'Mic, speakers, stage lights', 'OK', 0, ''),
+  ('chk-5', 'Washrooms', 'Taps, flush, cleanliness', 'OK', 0, ''),
+  ('chk-6', 'Kitchen & utensils', 'Gas, sinks, utensil count', 'OK', 0, ''),
+  ('chk-7', 'Floor, walls & doors', 'No stains, wall marks or damage', 'OK', 0, '')
+ON DUPLICATE KEY UPDATE label = VALUES(label), helper = VALUES(helper);
 
 -- Default Role & Permissions Matrix (Admin has full control & sole approval rights)
 INSERT INTO role_permissions (id, role, module, can_view, can_create, can_edit, can_approve) VALUES

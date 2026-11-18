@@ -3,6 +3,7 @@ const { query } = require("../config/db");
 const { requireAuth } = require("../middleware/auth");
 const { asyncHandler } = require("../middleware/errorHandler");
 const { getSystemSettings } = require("../utils/audit");
+const { ensureModule5AndFinanceSchema } = require("../utils/schemaEnsure");
 const {
   mapUser,
   mapRolePermission,
@@ -31,6 +32,7 @@ router.get(
   "/bootstrap",
   requireAuth,
   asyncHandler(async (req, res) => {
+    await ensureModule5AndFinanceSchema();
     const isAdmin = (req.user?.role || "").toLowerCase() === "admin";
 
     const [

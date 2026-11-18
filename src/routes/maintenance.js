@@ -9,35 +9,38 @@ const {
   mapHallCheckItem,
   mapDepositRefund,
 } = require("../utils/formatters");
+const { ensureModule5AndFinanceSchema } = require("../utils/schemaEnsure");
 
 const router = express.Router();
 router.use(["/tickets", "/hall-checks", "/inspections"], requireAuth);
 
-let inspectionPhotosTableReady = false;
-async function ensureInspectionPhotosTable() {
-  if (inspectionPhotosTableReady) return;
-  await query(`
-    CREATE TABLE IF NOT EXISTS inspection_photos (
-      id VARCHAR(64) PRIMARY KEY,
-      booking_receipt_no VARCHAR(32) NOT NULL,
-      mode ENUM('Before Event', 'After Event') NOT NULL DEFAULT 'Before Event',
-      label VARCHAR(200) NOT NULL,
-      is_issue TINYINT(1) NOT NULL DEFAULT 0,
-      data_url LONGTEXT NOT NULL,
-      size_kb INT NOT NULL DEFAULT 0,
-      uploaded_by VARCHAR(100) NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      INDEX idx_insp_photos_booking (booking_receipt_no)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  `);
-  inspectionPhotosTableReady = true;
-}
+const VALID_TICKET_CATEGORIES = new Set([
+  "Plumbing",
+  "Electrical",
+  "AC / Fans",
+  "Carpentry",
+  "Civil",
+  "Furniture",
+  "Cleaning",
+]);
+const VALID_TICKET_PRIORITIES = new Set(["Low", "Medium", "High", "Normal", "Urgent"]);
+const VALID_TICKET_STATUSES = new Set(["Draft", "Pending", "Approved", "In Progress", "Completed"]);
+const VALID_CHECK_STATUSES = new Set(["OK", "Issue"]);
+
+const ALLOWED_TICKET_TRANSITIONS = {
+  Draft: new Set(["Pending", "Approved"]),
+  Pending: new Set(["Approved"]),
+  Approved: new Set(["In Progress"]),
+  "In Progress": new Set(["Completed"]),
+  Completed: new Set([]),
+};
 
 function mapInspectionPhoto(row) {
   return {
     id: row.id,
     bookingReceiptNo: row.booking_receipt_no,
     mode: row.mode,
+    checklistItemId: row.checklist_item_id || undefined,
     label: row.label,
     isIssue: Boolean(row.is_issue),
     dataUrl: row.data_url,
@@ -45,6 +48,17 @@ function mapInspectionPhoto(row) {
     uploadedBy: row.uploaded_by || undefined,
     createdAt: row.created_at,
   };
+}
+
+async function resolveBookingByReceiptOrId(receiptOrId, conn = null) {
+  const exec = conn
+    ? (sql, params) => conn.execute(sql, params).then(([r]) => r)
+    : query;
+  const rows = await exec(
+    "SELECT * FROM bookings WHERE receipt_no = ? OR id = ? LIMIT 1",
+    [receiptOrId, receiptOrId]
+  );
+  return rows[0] || null;
 }
 
 router.get(
@@ -90,8 +104,33 @@ router.post(
       blockTo,
     } = body;
 
-    if (!title) {
+    if (!title || !String(title).trim()) {
       return res.status(400).json({ success: false, message: "Ticket title is required." });
+    }
+    if (!VALID_TICKET_CATEGORIES.has(category)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid category "${category}". Allowed: ${Array.from(VALID_TICKET_CATEGORIES).join(", ")}.`,
+      });
+    }
+    if (!VALID_TICKET_PRIORITIES.has(priority)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid priority "${priority}". Allowed: ${Array.from(VALID_TICKET_PRIORITIES).join(", ")}.`,
+      });
+    }
+    if (body.status !== undefined && !VALID_TICKET_STATUSES.has(body.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status "${body.status}". Allowed: ${Array.from(VALID_TICKET_STATUSES).join(", ")}.`,
+      });
+    }
+    const numCost = Number(estimatedCost);
+    if (!Number.isFinite(numCost) || numCost < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Estimated cost must be a non-negative number.",
+      });
     }
 
     const isAdminActor = (req.user?.role || "").toLowerCase() === "admin";
@@ -116,7 +155,12 @@ router.post(
       const isDraft = body.status === "Draft";
       const needsApproval =
         !isDraft && !isAdminActor && Boolean(settings.require_repair_admin_approval ?? 1);
-      const initialStatus = isDraft ? "Draft" : needsApproval ? "Pending" : body.status || "Pending";
+      // Non-admin can only create Draft or Pending tickets
+      const initialStatus = isDraft
+        ? "Draft"
+        : isAdminActor
+        ? body.status || "Approved"
+        : "Pending";
 
       await conn.execute(
         `INSERT INTO maintenance_tickets (
@@ -127,12 +171,12 @@ router.post(
         [
           id,
           ticketNo,
-          title,
+          String(title).trim(),
           category,
           subCategory || null,
           location,
           priority,
-          Number(estimatedCost || 0),
+          numCost,
           req.user.name || req.user.userId,
           dateLabel,
           initialStatus,
@@ -147,10 +191,17 @@ router.post(
       );
 
       for (const q of safeQuotations) {
+        const qAmount = Number(q.amount || 0);
         await conn.execute(
           `INSERT INTO maintenance_quotations (id, ticket_id, vendor, file_name, amount)
            VALUES (?, ?, ?, ?, ?)`,
-          [generateId("qt"), id, q.vendor || "Vendor", q.fileName || "quote.pdf", Number(q.amount || 0)]
+          [
+            generateId("qt"),
+            id,
+            q.vendor || "Vendor",
+            q.fileName || "quote.pdf",
+            Number.isFinite(qAmount) && qAmount >= 0 ? qAmount : 0,
+          ]
         );
       }
 
@@ -161,9 +212,9 @@ router.post(
           [
             generateId("apr"),
             blockHall ? "Hall Block" : "Repair Cost",
-            `${blockHall ? "Hall Block & Repair" : "Repair Request"} — ${title}`,
+            `${blockHall ? "Hall Block & Repair" : "Repair Request"} — ${String(title).trim()}`,
             `${location} · ${category} (${priority})`,
-            `₹${Number(estimatedCost || 0).toLocaleString("en-IN")}`,
+            `₹${numCost.toLocaleString("en-IN")}`,
             req.user.name || req.user.userId,
             ticketNo,
           ]
@@ -174,10 +225,10 @@ router.post(
         userLabel: req.user.name || req.user.role,
         module: "Maintenance",
         action: isDraft ? `Saved draft ticket ${ticketNo}` : `Raised repair ticket ${ticketNo}`,
-        detail: `${title} (${location}) · Est. ₹${Number(estimatedCost || 0).toLocaleString("en-IN")}`,
+        detail: `${String(title).trim()} (${location}) · Est. ₹${numCost.toLocaleString("en-IN")}`,
         category: needsApproval ? "Approvals" : "Repairs",
         alertTitle: `New Repair Ticket ${ticketNo}`,
-        alertDetail: `${title} · ${location} (${priority})`,
+        alertDetail: `${String(title).trim()} · ${location} (${priority})`,
         href: needsApproval ? "/approvals" : "/maintenance",
       });
 
@@ -195,8 +246,16 @@ router.patch(
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { status, photos } = req.body || {};
+
     if (!status && !Array.isArray(photos)) {
       return res.status(400).json({ success: false, message: "Status or photos are required." });
+    }
+
+    if (status !== undefined && !VALID_TICKET_STATUSES.has(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid ticket status "${status}". Allowed: ${Array.from(VALID_TICKET_STATUSES).join(", ")}.`,
+      });
     }
 
     const isAdminActor = (req.user?.role || "").toLowerCase() === "admin";
@@ -219,6 +278,19 @@ router.patch(
         throw err;
       }
 
+      if (status && status !== current.status) {
+        const allowed = ALLOWED_TICKET_TRANSITIONS[current.status] || new Set();
+        if (!allowed.has(status)) {
+          const err = new Error(
+            current.status === "Pending"
+              ? `Cannot move ticket from Pending directly to ${status}. Admin approval is required first.`
+              : `Invalid status transition from "${current.status}" to "${status}".`
+          );
+          err.statusCode = 400;
+          throw err;
+        }
+      }
+
       const nextStatus = status || current.status;
       const nextPhotosJson = Array.isArray(photos)
         ? JSON.stringify(photos)
@@ -231,7 +303,17 @@ router.patch(
         [nextStatus, nextPhotosJson, current.id]
       );
 
-      if (status) {
+      // If Admin directly approves a Pending ticket here, also mark matching pending approval Approved
+      if (status === "Approved" && current.status === "Pending") {
+        await conn.execute(
+          `UPDATE approvals
+           SET status = 'Approved', decided_by = ?, decided_at = NOW()
+           WHERE reference_no = ? AND type IN ('Repair Cost', 'Hall Block') AND status = 'Pending'`,
+          [req.user.name || req.user.userId, current.ticket_no]
+        );
+      }
+
+      if (status && status !== current.status) {
         await recordActivity(conn, {
           userLabel: req.user.name || req.user.role,
           module: "Maintenance",
@@ -260,6 +342,7 @@ router.patch(
 router.get(
   "/hall-checks",
   asyncHandler(async (req, res) => {
+    await ensureModule5AndFinanceSchema();
     const rows = await query("SELECT * FROM hall_check_items ORDER BY id ASC");
     res.json({ success: true, items: rows.map(mapHallCheckItem) });
   })
@@ -268,29 +351,168 @@ router.get(
 router.patch(
   "/hall-checks/:id",
   asyncHandler(async (req, res) => {
+    await ensureModule5AndFinanceSchema();
     const { id } = req.params;
-    const { status = "OK", issueCost = 0, note = "" } = req.body || {};
+    const { status = "OK", issueCost = 0, note = "", bookingReceiptNo } = req.body || {};
 
-    await query(
-      "UPDATE hall_check_items SET status = ?, issue_cost = ?, note = ? WHERE id = ?",
-      [status, status === "OK" ? 0 : Number(issueCost || 0), status === "OK" ? "" : note, id]
-    );
-    const rows = await query("SELECT * FROM hall_check_items WHERE id = ? LIMIT 1", [id]);
-    if (!rows[0]) {
+    if (!VALID_CHECK_STATUSES.has(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid checklist status "${status}". Allowed: OK, Issue.`,
+      });
+    }
+    const numCost = Number(issueCost);
+    if (!Number.isFinite(numCost) || numCost < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Deduction cost must be 0 or greater (negative values are not allowed).",
+      });
+    }
+
+    const templateRows = await query("SELECT * FROM hall_check_items WHERE id = ? LIMIT 1", [id]);
+    if (!templateRows[0]) {
       return res.status(404).json({ success: false, message: "Checklist item not found" });
     }
-    res.json({ success: true, item: mapHallCheckItem(rows[0]) });
+
+    const normalizedCost = status === "OK" ? 0 : Math.round(numCost);
+    const normalizedNote = status === "OK" ? "" : String(note || "");
+
+    if (bookingReceiptNo) {
+      const booking = await resolveBookingByReceiptOrId(bookingReceiptNo);
+      if (!booking) {
+        return res.status(404).json({ success: false, message: "Booking not found" });
+      }
+      await query(
+        `INSERT INTO booking_hall_checks (booking_receipt_no, item_id, status, issue_cost, note)
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE status = VALUES(status), issue_cost = VALUES(issue_cost), note = VALUES(note)`,
+        [booking.receipt_no, id, status, normalizedCost, normalizedNote]
+      );
+      return res.json({
+        success: true,
+        item: {
+          ...mapHallCheckItem(templateRows[0]),
+          status,
+          issueCost: normalizedCost,
+          note: normalizedNote,
+        },
+      });
+    }
+
+    // Legacy fallback: do not mutate global template if no booking specified, just return validated shape
+    res.json({
+      success: true,
+      item: {
+        ...mapHallCheckItem(templateRows[0]),
+        status,
+        issueCost: normalizedCost,
+        note: normalizedNote,
+      },
+    });
+  })
+);
+
+router.get(
+  "/inspections/:bookingReceiptNo/checklist",
+  asyncHandler(async (req, res) => {
+    await ensureModule5AndFinanceSchema();
+    const { bookingReceiptNo } = req.params;
+    const booking = await resolveBookingByReceiptOrId(bookingReceiptNo);
+    if (!booking) {
+      return res.status(404).json({ success: false, message: "Booking not found" });
+    }
+
+    const [templateRows, bookingRows] = await Promise.all([
+      query("SELECT * FROM hall_check_items ORDER BY id ASC"),
+      query("SELECT * FROM booking_hall_checks WHERE booking_receipt_no = ?", [booking.receipt_no]),
+    ]);
+
+    const overrideByItem = new Map(bookingRows.map((r) => [r.item_id, r]));
+    const items = templateRows.map((tpl) => {
+      const ov = overrideByItem.get(tpl.id);
+      return {
+        id: tpl.id,
+        label: tpl.label,
+        helper: tpl.helper,
+        status: ov ? ov.status : "OK",
+        issueCost: ov ? Number(ov.issue_cost || 0) : 0,
+        note: ov ? ov.note || "" : "",
+      };
+    });
+
+    res.json({ success: true, bookingReceiptNo: booking.receipt_no, items });
+  })
+);
+
+router.patch(
+  "/inspections/:bookingReceiptNo/checklist/:itemId",
+  asyncHandler(async (req, res) => {
+    await ensureModule5AndFinanceSchema();
+    const { bookingReceiptNo, itemId } = req.params;
+    const { status = "OK", issueCost = 0, note = "" } = req.body || {};
+
+    if (!VALID_CHECK_STATUSES.has(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid checklist status "${status}". Allowed: OK, Issue.`,
+      });
+    }
+    const numCost = Number(issueCost);
+    if (!Number.isFinite(numCost) || numCost < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Deduction cost cannot be negative.",
+      });
+    }
+
+    const [booking, templateRows] = await Promise.all([
+      resolveBookingByReceiptOrId(bookingReceiptNo),
+      query("SELECT * FROM hall_check_items WHERE id = ? LIMIT 1", [itemId]),
+    ]);
+    if (!booking) {
+      return res.status(404).json({ success: false, message: "Booking not found" });
+    }
+    if (!templateRows[0]) {
+      return res.status(404).json({ success: false, message: "Checklist item not found" });
+    }
+
+    const normalizedCost = status === "OK" ? 0 : Math.round(numCost);
+    const normalizedNote = status === "OK" ? "" : String(note || "");
+
+    await query(
+      `INSERT INTO booking_hall_checks (booking_receipt_no, item_id, status, issue_cost, note)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE status = VALUES(status), issue_cost = VALUES(issue_cost), note = VALUES(note)`,
+      [booking.receipt_no, itemId, status, normalizedCost, normalizedNote]
+    );
+
+    res.json({
+      success: true,
+      item: {
+        id: templateRows[0].id,
+        label: templateRows[0].label,
+        helper: templateRows[0].helper,
+        status,
+        issueCost: normalizedCost,
+        note: normalizedNote,
+      },
+    });
   })
 );
 
 router.get(
   "/inspections/:bookingReceiptNo/photos",
   asyncHandler(async (req, res) => {
-    await ensureInspectionPhotosTable();
+    await ensureModule5AndFinanceSchema();
     const { bookingReceiptNo } = req.params;
+    const booking = await resolveBookingByReceiptOrId(bookingReceiptNo);
+    if (!booking) {
+      return res.status(404).json({ success: false, message: "Booking not found" });
+    }
+
     const rows = await query(
       "SELECT * FROM inspection_photos WHERE booking_receipt_no = ? ORDER BY created_at DESC",
-      [bookingReceiptNo]
+      [booking.receipt_no]
     );
     res.json({ success: true, photos: rows.map(mapInspectionPhoto) });
   })
@@ -299,8 +521,13 @@ router.get(
 router.post(
   "/inspections/:bookingReceiptNo/photos",
   asyncHandler(async (req, res) => {
-    await ensureInspectionPhotosTable();
+    await ensureModule5AndFinanceSchema();
     const { bookingReceiptNo } = req.params;
+    const booking = await resolveBookingByReceiptOrId(bookingReceiptNo);
+    if (!booking) {
+      return res.status(404).json({ success: false, message: "Booking not found" });
+    }
+
     const body = req.body || {};
     const list = Array.isArray(body.photos) ? body.photos : [body];
 
@@ -320,21 +547,25 @@ router.post(
     for (const p of validItems) {
       const id = generateId("ip");
       const mode = p.mode === "After Event" ? "After Event" : "Before Event";
+      const checklistItemId =
+        typeof p.checklistItemId === "string" && p.checklistItemId.trim()
+          ? p.checklistItemId.trim().slice(0, 64)
+          : null;
       const label = String(p.label || "Inspection photo").slice(0, 200);
       const isIssue = p.isIssue ? 1 : 0;
       const sizeKb = Number(p.sizeKb || Math.round((p.dataUrl.length * 3) / 4 / 1024));
 
       await query(
-        `INSERT INTO inspection_photos (id, booking_receipt_no, mode, label, is_issue, data_url, size_kb, uploaded_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, bookingReceiptNo, mode, label, isIssue, p.dataUrl, sizeKb, uploadedBy]
+        `INSERT INTO inspection_photos (id, booking_receipt_no, mode, checklist_item_id, label, is_issue, data_url, size_kb, uploaded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, booking.receipt_no, mode, checklistItemId, label, isIssue, p.dataUrl, sizeKb, uploadedBy]
       );
       insertedIds.push(id);
     }
 
     const rows = await query(
       `SELECT * FROM inspection_photos WHERE booking_receipt_no = ? ORDER BY created_at DESC`,
-      [bookingReceiptNo]
+      [booking.receipt_no]
     );
 
     res.status(201).json({
@@ -348,7 +579,7 @@ router.post(
 router.delete(
   "/inspections/photos/:photoId",
   asyncHandler(async (req, res) => {
-    await ensureInspectionPhotosTable();
+    await ensureModule5AndFinanceSchema();
     const { photoId } = req.params;
     await query("DELETE FROM inspection_photos WHERE id = ?", [photoId]);
     res.json({ success: true, deletedId: photoId });
@@ -358,7 +589,7 @@ router.delete(
 router.post(
   "/hall-checks/save-to-refund",
   asyncHandler(async (req, res) => {
-    await ensureInspectionPhotosTable();
+    await ensureModule5AndFinanceSchema();
     const {
       refundId,
       bookingReceiptNo,
@@ -371,35 +602,88 @@ router.post(
         .status(400)
         .json({ success: false, message: "bookingReceiptNo or refundId is required." });
     }
+    if (mode !== "Before Event" && mode !== "After Event") {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid inspection mode. Allowed: "Before Event", "After Event".',
+      });
+    }
+
+    const checklistItems = Array.isArray(items) ? items : [];
+    for (const item of checklistItems) {
+      if (item.status && !VALID_CHECK_STATUSES.has(item.status)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid checklist item status "${item.status}".`,
+        });
+      }
+      if (item.status === "Issue") {
+        const cost = Number(item.issueCost ?? 0);
+        if (!Number.isFinite(cost) || cost < 0) {
+          return res.status(400).json({
+            success: false,
+            message: `Deduction cost for "${item.label || item.id}" cannot be negative.`,
+          });
+        }
+      }
+    }
 
     const result = await withTransaction(async (conn) => {
-      // 1. Resolve booking
+      // 1. Resolve booking or refund
       let targetBooking = null;
+      let existingRefund = null;
+
       if (bookingReceiptNo) {
-        const [bRows] = await conn.execute(
-          "SELECT * FROM bookings WHERE receipt_no = ? OR id = ? LIMIT 1",
-          [bookingReceiptNo, bookingReceiptNo]
+        targetBooking = await resolveBookingByReceiptOrId(bookingReceiptNo, conn);
+      }
+      if (refundId) {
+        const [rRows] = await conn.execute(
+          "SELECT * FROM deposit_refunds WHERE id = ? OR booking_receipt_no = ? LIMIT 1",
+          [refundId, refundId]
         );
-        targetBooking = bRows[0] || null;
+        existingRefund = rRows[0] || null;
+        if (!targetBooking && existingRefund) {
+          targetBooking = await resolveBookingByReceiptOrId(existingRefund.booking_receipt_no, conn);
+        }
       }
 
-      // 2. Persist current checklist item states if supplied
-      const checklistItems = Array.isArray(items) ? items : [];
+      if (!targetBooking && !existingRefund) {
+        const err = new Error("Booking not found");
+        err.statusCode = 404;
+        throw err;
+      }
+
+      const effectiveReceiptNo = targetBooking?.receipt_no || existingRefund.booking_receipt_no;
+      const heldAmount = Number(
+        existingRefund ? existingRefund.held_amount : targetBooking?.deposit || 0
+      );
+
+      const issues = checklistItems.filter((i) => i.status === "Issue");
+      const totalDeduction = issues.reduce((acc, i) => acc + Math.round(Number(i.issueCost || 0)), 0);
+
+      if (mode === "After Event" && totalDeduction > heldAmount) {
+        const err = new Error(
+          `Total deduction (₹${totalDeduction.toLocaleString("en-IN")}) cannot exceed held security deposit (₹${heldAmount.toLocaleString("en-IN")}).`
+        );
+        err.statusCode = 400;
+        throw err;
+      }
+
+      // 2. Persist per-booking checklist states (isolated to effectiveReceiptNo!)
       for (const item of checklistItems) {
         if (!item?.id) continue;
+        const normalizedStatus = item.status === "Issue" ? "Issue" : "OK";
+        const normalizedCost = normalizedStatus === "Issue" ? Math.round(Number(item.issueCost || 0)) : 0;
+        const normalizedNote = normalizedStatus === "Issue" ? String(item.note || "") : "";
         await conn.execute(
-          "UPDATE hall_check_items SET status = ?, issue_cost = ?, note = ? WHERE id = ?",
-          [
-            item.status === "Issue" ? "Issue" : "OK",
-            item.status === "Issue" ? Number(item.issueCost || 0) : 0,
-            item.status === "Issue" ? String(item.note || "") : "",
-            item.id,
-          ]
+          `INSERT INTO booking_hall_checks (booking_receipt_no, item_id, status, issue_cost, note)
+           VALUES (?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE status = VALUES(status), issue_cost = VALUES(issue_cost), note = VALUES(note)`,
+          [effectiveReceiptNo, item.id, normalizedStatus, normalizedCost, normalizedNote]
         );
       }
 
       // 3. Update booking inspection flags
-      const effectiveReceiptNo = targetBooking?.receipt_no || bookingReceiptNo;
       if (targetBooking) {
         if (mode === "Before Event") {
           await conn.execute("UPDATE bookings SET pre_inspection_done = 1 WHERE id = ?", [
@@ -413,27 +697,18 @@ router.post(
         }
       }
 
-      const issues = checklistItems.filter((i) => i.status === "Issue");
-      const totalDeduction = issues.reduce((acc, i) => acc + Number(i.issueCost || 0), 0);
       const deductionNote =
         issues.length > 0
           ? issues
-              .map((i) => `${i.note || i.label} (₹${Number(i.issueCost || 0)})`)
+              .map((i) => `${i.note || i.label} (₹${Math.round(Number(i.issueCost || 0))})`)
               .join(", ")
           : "Hall checked — zero damage";
 
       let updatedRefund = null;
 
       if (mode === "After Event" || refundId) {
-        let refund = null;
-        if (refundId) {
-          const [rRows] = await conn.execute(
-            "SELECT * FROM deposit_refunds WHERE id = ? OR booking_receipt_no = ? LIMIT 1",
-            [refundId, refundId]
-          );
-          refund = rRows[0] || null;
-        }
-        if (!refund && effectiveReceiptNo) {
+        let refund = existingRefund;
+        if (!refund) {
           const [rRows] = await conn.execute(
             "SELECT * FROM deposit_refunds WHERE booking_receipt_no = ? LIMIT 1",
             [effectiveReceiptNo]
@@ -441,7 +716,7 @@ router.post(
           refund = rRows[0] || null;
         }
 
-        const inspectionRef = `INS-${new Date().getFullYear()}-${effectiveReceiptNo || "0000"}-B · ${
+        const inspectionRef = `INS-${new Date().getFullYear()}-${effectiveReceiptNo}-B · ${
           issues.length
         } ${issues.length === 1 ? "issue" : "issues"}`;
 
@@ -452,39 +727,51 @@ router.post(
               id, booking_receipt_no, applicant_name, event_title, event_date,
               held_amount, deduction_amount, deduction_note, refund_mode, status,
               collected_label, inspection_ref
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Ready to Refund', ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Ready to Refund', ?, ?)
+            ON DUPLICATE KEY UPDATE
+              deduction_amount = VALUES(deduction_amount),
+              deduction_note = VALUES(deduction_note),
+              inspection_ref = VALUES(inspection_ref)`,
             [
               newRefundId,
               targetBooking.receipt_no,
               targetBooking.applicant_name,
               targetBooking.event_title,
               targetBooking.date_label,
-              Number(targetBooking.deposit || 0),
+              heldAmount,
               totalDeduction,
               deductionNote,
               targetBooking.payment_mode || "UPI",
-              `₹${Number(targetBooking.deposit || 0).toLocaleString("en-IN")} · ${
-                targetBooking.payment_mode || "UPI"
-              }`,
+              `₹${heldAmount.toLocaleString("en-IN")} · ${targetBooking.payment_mode || "UPI"}`,
               inspectionRef,
             ]
           );
           const [createdRows] = await conn.execute(
-            "SELECT * FROM deposit_refunds WHERE id = ? LIMIT 1",
-            [newRefundId]
+            "SELECT * FROM deposit_refunds WHERE booking_receipt_no = ? LIMIT 1",
+            [targetBooking.receipt_no]
           );
           refund = createdRows[0];
         }
 
         if (refund) {
-          const [photoCountRows] = await conn.execute(
-            "SELECT COUNT(*) AS cnt FROM inspection_photos WHERE booking_receipt_no = ? AND mode = 'After Event'",
+          // Count After Event photos per checklist item (never duplicating a global total across unrelated lines)
+          const [photoCounts] = await conn.execute(
+            `SELECT checklist_item_id, COUNT(*) AS cnt
+             FROM inspection_photos
+             WHERE booking_receipt_no = ? AND mode = 'After Event'
+             GROUP BY checklist_item_id`,
             [refund.booking_receipt_no]
           );
-          const afterPhotosCount = Number(photoCountRows[0]?.cnt || 0);
+          const countByItem = new Map();
+          for (const row of photoCounts) {
+            if (row.checklist_item_id) {
+              countByItem.set(row.checklist_item_id, Number(row.cnt || 0));
+            }
+          }
 
           await conn.execute("DELETE FROM deposit_deduction_items WHERE refund_id = ?", [refund.id]);
           for (const issue of issues) {
+            const linkedPhotoCount = countByItem.get(issue.id) || 0;
             await conn.execute(
               `INSERT INTO deposit_deduction_items (id, refund_id, item, location, photos_count, amount)
                VALUES (?, ?, ?, 'Hall Inspection', ?, ?)`,
@@ -492,8 +779,8 @@ router.post(
                 generateId("dd"),
                 refund.id,
                 issue.note ? `${issue.label} (${issue.note})` : issue.label,
-                afterPhotosCount,
-                Number(issue.issueCost || 0),
+                linkedPhotoCount,
+                Math.round(Number(issue.issueCost || 0)),
               ]
             );
           }
@@ -521,10 +808,10 @@ router.post(
       await recordActivity(conn, {
         userLabel: req.user.name || req.user.role,
         module: "Maintenance",
-        action: `Saved ${mode} inspection for #${effectiveReceiptNo || refundId}`,
+        action: `Saved ${mode} inspection for #${effectiveReceiptNo}`,
         detail: `${issues.length} issue(s) · ${deductionNote}`,
         category: "Repairs",
-        alertTitle: `${mode} Inspection Saved — #${effectiveReceiptNo || refundId}`,
+        alertTitle: `${mode} Inspection Saved — #${effectiveReceiptNo}`,
         alertDetail: `Deduction ₹${totalDeduction.toLocaleString("en-IN")} · ${deductionNote}`,
         href: updatedRefund ? `/deposits/${updatedRefund.bookingReceiptNo}` : "/maintenance",
       });

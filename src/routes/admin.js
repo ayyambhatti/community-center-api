@@ -175,12 +175,18 @@ router.patch(
           nextRefundStatus,
           current.reference_no,
         ]);
+        if (status === "Approved") {
+          await conn.execute("UPDATE bookings SET deposit_status = 'Refunded' WHERE receipt_no = ?", [
+            current.reference_no,
+          ]);
+        }
       } else if (current.type === "Repair Cost" || current.type === "Hall Block") {
-        const nextTicketStatus = status === "Approved" ? "Approved" : "Pending";
-        await conn.execute("UPDATE maintenance_tickets SET status = ? WHERE ticket_no = ?", [
-          nextTicketStatus,
-          current.reference_no,
-        ]);
+        if (status === "Approved") {
+          await conn.execute(
+            "UPDATE maintenance_tickets SET status = 'Approved' WHERE ticket_no = ? AND status = 'Pending'",
+            [current.reference_no]
+          );
+        }
       } else if (current.type === "Record Payment") {
         const meta = current.metadata_json
           ? typeof current.metadata_json === "string"
@@ -188,13 +194,29 @@ router.patch(
             : current.metadata_json
           : null;
         if (meta?.paymentId) {
-          await conn.execute("UPDATE payments SET status = ? WHERE id = ?", [status, meta.paymentId]);
           if (status === "Approved" && meta.bookingId && meta.amount) {
-            await conn.execute("UPDATE bookings SET paid = paid + ? WHERE id = ?", [
-              Number(meta.amount),
-              meta.bookingId,
-            ]);
+            const [bkRows] = await conn.execute(
+              "SELECT rent, deposit, paid, is_free_use FROM bookings WHERE id = ? LIMIT 1 FOR UPDATE",
+              [meta.bookingId]
+            );
+            const bk = bkRows[0];
+            if (bk) {
+              const totalCharge = bk.is_free_use ? 0 : Number(bk.rent || 0) + Number(bk.deposit || 0);
+              const remaining = Math.max(0, totalCharge - Number(bk.paid || 0));
+              if (Number(meta.amount) > remaining) {
+                const err = new Error(
+                  `Cannot approve payment of ₹${Number(meta.amount).toLocaleString("en-IN")}: exceeds remaining balance ₹${remaining.toLocaleString("en-IN")}.`
+                );
+                err.statusCode = 400;
+                throw err;
+              }
+              await conn.execute("UPDATE bookings SET paid = paid + ? WHERE id = ?", [
+                Number(meta.amount),
+                meta.bookingId,
+              ]);
+            }
           }
+          await conn.execute("UPDATE payments SET status = ? WHERE id = ?", [status, meta.paymentId]);
         }
       } else if (current.type === "Customer Edit" && status === "Approved") {
         const meta = current.metadata_json

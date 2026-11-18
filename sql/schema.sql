@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS deposit_refunds (
   remarks TEXT NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX idx_refunds_receipt (booking_receipt_no)
+  UNIQUE KEY uq_refunds_receipt (booking_receipt_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS deposit_deduction_items (
@@ -213,6 +213,7 @@ CREATE TABLE IF NOT EXISTS inspection_photos (
   id VARCHAR(64) PRIMARY KEY,
   booking_receipt_no VARCHAR(32) NOT NULL,
   mode ENUM('Before Event', 'After Event') NOT NULL DEFAULT 'Before Event',
+  checklist_item_id VARCHAR(64) NULL,
   label VARCHAR(200) NOT NULL,
   is_issue TINYINT(1) NOT NULL DEFAULT 0,
   data_url LONGTEXT NOT NULL,
@@ -220,6 +221,16 @@ CREATE TABLE IF NOT EXISTS inspection_photos (
   uploaded_by VARCHAR(100) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_insp_photos_booking (booking_receipt_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS booking_hall_checks (
+  booking_receipt_no VARCHAR(32) NOT NULL,
+  item_id VARCHAR(64) NOT NULL,
+  status ENUM('OK', 'Issue') NOT NULL DEFAULT 'OK',
+  issue_cost INT NOT NULL DEFAULT 0,
+  note TEXT NOT NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (booking_receipt_no, item_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS staff_attendance (
