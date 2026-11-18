@@ -209,6 +209,19 @@ CREATE TABLE IF NOT EXISTS hall_check_items (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS inspection_photos (
+  id VARCHAR(64) PRIMARY KEY,
+  booking_receipt_no VARCHAR(32) NOT NULL,
+  mode ENUM('Before Event', 'After Event') NOT NULL DEFAULT 'Before Event',
+  label VARCHAR(200) NOT NULL,
+  is_issue TINYINT(1) NOT NULL DEFAULT 0,
+  data_url LONGTEXT NOT NULL,
+  size_kb INT NOT NULL DEFAULT 0,
+  uploaded_by VARCHAR(100) NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_insp_photos_booking (booking_receipt_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS staff_attendance (
   id VARCHAR(64) PRIMARY KEY,
   name VARCHAR(120) NOT NULL,
