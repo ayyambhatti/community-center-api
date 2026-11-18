@@ -710,10 +710,18 @@ router.post(
         let refund = existingRefund;
         if (!refund) {
           const [rRows] = await conn.execute(
-            "SELECT * FROM deposit_refunds WHERE booking_receipt_no = ? LIMIT 1",
+            "SELECT * FROM deposit_refunds WHERE booking_receipt_no = ? LIMIT 1 FOR UPDATE",
             [effectiveReceiptNo]
           );
           refund = rRows[0] || null;
+        }
+
+        if (refund && refund.status === "Refunded") {
+          const err = new Error(
+            "Deposit refund has already been marked Refunded and cannot be modified."
+          );
+          err.statusCode = 409;
+          throw err;
         }
 
         const inspectionRef = `INS-${new Date().getFullYear()}-${effectiveReceiptNo}-B · ${

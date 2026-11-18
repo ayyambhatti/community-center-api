@@ -132,11 +132,22 @@ router.patch(
     }
 
     const updated = await withTransaction(async (conn) => {
-      const [rows] = await conn.execute("SELECT * FROM approvals WHERE id = ? LIMIT 1", [id]);
+      const [rows] = await conn.execute(
+        "SELECT * FROM approvals WHERE id = ? LIMIT 1 FOR UPDATE",
+        [id]
+      );
       const current = rows[0];
       if (!current) {
         const err = new Error("Approval item not found");
         err.statusCode = 404;
+        throw err;
+      }
+
+      if (current.status !== "Pending") {
+        const err = new Error(
+          `Approval has already been ${current.status} and cannot be modified again.`
+        );
+        err.statusCode = 409;
         throw err;
       }
 
@@ -194,6 +205,16 @@ router.patch(
             : current.metadata_json
           : null;
         if (meta?.paymentId) {
+          const [payRows] = await conn.execute(
+            "SELECT id, status, amount, booking_id FROM payments WHERE id = ? LIMIT 1 FOR UPDATE",
+            [meta.paymentId]
+          );
+          const payRec = payRows[0];
+          if (payRec && payRec.status !== "Pending") {
+            const err = new Error(`Payment has already been ${payRec.status}.`);
+            err.statusCode = 409;
+            throw err;
+          }
           if (status === "Approved" && meta.bookingId && meta.amount) {
             const [bkRows] = await conn.execute(
               "SELECT rent, deposit, paid, is_free_use FROM bookings WHERE id = ? LIMIT 1 FOR UPDATE",

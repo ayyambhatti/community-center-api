@@ -358,6 +358,32 @@ router.post(
       });
     }
 
+    const existingRows = await query(
+      "SELECT id, status FROM deposit_refunds WHERE booking_receipt_no = ? LIMIT 1",
+      [bookingReceiptNo]
+    );
+    if (existingRows[0]?.status === "Refunded") {
+      return res.status(409).json({
+        success: false,
+        message: "Deposit refund has already been marked Refunded and is locked.",
+      });
+    }
+    if (existingRows[0]) {
+      const existingItems = await query(
+        "SELECT amount FROM deposit_deduction_items WHERE refund_id = ?",
+        [existingRows[0].id]
+      );
+      if (existingItems.length > 0) {
+        const itemsSum = existingItems.reduce((s, d) => s + Number(d.amount || 0), 0);
+        if (numDeduction !== itemsSum) {
+          return res.status(400).json({
+            success: false,
+            message: `deductionAmount (₹${numDeduction.toLocaleString("en-IN")}) does not match itemized deductions total (₹${itemsSum.toLocaleString("en-IN")}).`,
+          });
+        }
+      }
+    }
+
     const id = generateId("ref");
     await query(
       `INSERT INTO deposit_refunds (
@@ -433,6 +459,14 @@ router.patch(
         throw err;
       }
 
+      if (current.status === "Refunded") {
+        const err = new Error(
+          "Deposit refund has already been marked Refunded and cannot be reopened or modified."
+        );
+        err.statusCode = 409;
+        throw err;
+      }
+
       if (patch.status === "Refunded" && !isAdminActor) {
         const err = new Error("Deposit payouts must be approved by Admin before marking Refunded.");
         err.statusCode = 403;
@@ -463,6 +497,21 @@ router.patch(
           itemsSum += amt;
         }
         nextDeduction = itemsSum;
+      } else if (patch.deductionAmount !== undefined) {
+        const [existingItems] = await conn.execute(
+          "SELECT amount FROM deposit_deduction_items WHERE refund_id = ?",
+          [current.id]
+        );
+        if (existingItems.length > 0) {
+          const existingSum = existingItems.reduce((s, d) => s + Number(d.amount || 0), 0);
+          if (nextDeduction !== existingSum) {
+            const err = new Error(
+              `deductionAmount (₹${nextDeduction.toLocaleString("en-IN")}) does not match itemized deductions total (₹${existingSum.toLocaleString("en-IN")}). Update deductionItems to change deductions.`
+            );
+            err.statusCode = 400;
+            throw err;
+          }
+        }
       }
 
       if (nextDeduction > heldAmount) {
