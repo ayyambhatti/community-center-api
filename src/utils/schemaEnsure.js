@@ -125,6 +125,36 @@ async function runSchemaMigrations() {
       "ALTER TABLE deposit_refunds ADD UNIQUE INDEX uq_refunds_receipt (booking_receipt_no)"
     );
   }
+
+  // 5. Ensure electricity rate & meter columns on system_settings and bookings
+  const ensureColumn = async (table, colName, colDef) => {
+    const existing = await query(
+      `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+      [table, colName]
+    );
+    if (existing.length === 0) {
+      await query(`ALTER TABLE ${table} ADD COLUMN ${colName} ${colDef}`);
+    }
+  };
+
+  await ensureColumn(
+    "system_settings",
+    "electricity_rate_per_unit",
+    "DECIMAL(10,2) NOT NULL DEFAULT 12.00"
+  );
+  await ensureColumn(
+    "bookings",
+    "electricity_rate_per_unit",
+    "DECIMAL(10,2) NOT NULL DEFAULT 12.00"
+  );
+  await ensureColumn("bookings", "electricity_waived", "TINYINT(1) NOT NULL DEFAULT 0");
+  await ensureColumn("bookings", "meter_opening_unit", "DECIMAL(12,2) NULL");
+  await ensureColumn("bookings", "meter_opening_at", "DATETIME NULL");
+  await ensureColumn("bookings", "meter_opening_by", "VARCHAR(100) NULL");
+  await ensureColumn("bookings", "meter_closing_unit", "DECIMAL(12,2) NULL");
+  await ensureColumn("bookings", "meter_closing_at", "DATETIME NULL");
+  await ensureColumn("bookings", "meter_closing_by", "VARCHAR(100) NULL");
 }
 
 function ensureModule5AndFinanceSchema() {

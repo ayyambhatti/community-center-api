@@ -4,6 +4,7 @@ const { requireAuth } = require("../middleware/auth");
 const { asyncHandler } = require("../middleware/errorHandler");
 const { generateId, getSystemSettings, recordActivity } = require("../utils/audit");
 const { mapApplicant, mapBooking } = require("../utils/formatters");
+const { ensureModule5AndFinanceSchema } = require("../utils/schemaEnsure");
 
 const router = express.Router();
 router.use(["/bookings", "/applicants"], requireAuth);
@@ -50,6 +51,7 @@ router.get(
 router.post(
   "/bookings",
   asyncHandler(async (req, res) => {
+    await ensureModule5AndFinanceSchema();
     const body = req.body || {};
     const {
       eventTitle,
@@ -145,14 +147,21 @@ router.post(
         ? body.status || "Confirmed"
         : "Pending";
       const depositStatus = isFreeUse || Number(deposit) <= 0 ? "N/A" : "Held";
+      const electricityRatePerUnit = Math.max(
+        0,
+        Number(body.electricityRatePerUnit ?? settings.electricity_rate_per_unit ?? 12)
+      );
+      const electricityWaived =
+        body.electricityWaived !== undefined ? (body.electricityWaived ? 1 : 0) : isFreeUse ? 1 : 0;
 
       await conn.execute(
         `INSERT INTO bookings (
           id, receipt_no, event_title, event_type, applicant_id, applicant_name, phone,
           hall, is_ac, date_iso, end_date_iso, date_label, timing, guests,
           rent, deposit, paid, status, is_free_use, notes, payment_mode,
-          created_at_label, created_by, deposit_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          created_at_label, created_by, deposit_status,
+          electricity_rate_per_unit, electricity_waived
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           bookingId,
           nextReceiptNo,
@@ -178,6 +187,8 @@ router.post(
           body.createdAtLabel || "Just now",
           req.user.name || req.user.userId,
           depositStatus,
+          electricityRatePerUnit,
+          electricityWaived,
         ]
       );
 

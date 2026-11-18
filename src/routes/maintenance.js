@@ -83,6 +83,22 @@ router.get(
   })
 );
 
+router.get(
+  "/tickets/:id/photos",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const rows = await query(
+      "SELECT id, ticket_no, photos_json FROM maintenance_tickets WHERE id = ? OR ticket_no = ? LIMIT 1",
+      [id, id]
+    );
+    if (!rows[0]) {
+      return res.status(404).json({ success: false, message: "Maintenance ticket not found" });
+    }
+    const mapped = mapMaintenanceTicket(rows[0], [], { includePhotoData: true });
+    res.json({ success: true, ticketId: rows[0].id, ticketNo: rows[0].ticket_no, photos: mapped.photos });
+  })
+);
+
 router.post(
   "/tickets",
   asyncHandler(async (req, res) => {
@@ -586,6 +602,182 @@ router.delete(
   })
 );
 
+router.get(
+  "/inspections/meter/last",
+  asyncHandler(async (req, res) => {
+    await ensureModule5AndFinanceSchema();
+    const rows = await query(
+      `SELECT receipt_no, meter_closing_unit, meter_closing_at
+       FROM bookings
+       WHERE meter_closing_unit IS NOT NULL
+       ORDER BY meter_closing_at DESC, updated_at DESC
+       LIMIT 1`
+    );
+    const last = rows[0] || null;
+    res.json({
+      success: true,
+      lastReading: last
+        ? {
+            bookingReceiptNo: last.receipt_no,
+            closingUnit: Number(last.meter_closing_unit),
+            recordedAt: last.meter_closing_at,
+          }
+        : null,
+    });
+  })
+);
+
+router.patch(
+  "/inspections/:bookingReceiptNo/meter",
+  asyncHandler(async (req, res) => {
+    await ensureModule5AndFinanceSchema();
+    const { bookingReceiptNo } = req.params;
+    const {
+      openingUnit,
+      closingUnit,
+      electricityRatePerUnit,
+      electricityWaived,
+    } = req.body || {};
+
+    const result = await withTransaction(async (conn) => {
+      const booking = await resolveBookingByReceiptOrId(bookingReceiptNo, conn);
+      if (!booking) {
+        const err = new Error("Booking not found");
+        err.statusCode = 404;
+        throw err;
+      }
+
+      const [rRows] = await conn.execute(
+        "SELECT status FROM deposit_refunds WHERE booking_receipt_no = ? LIMIT 1",
+        [booking.receipt_no]
+      );
+      if (rRows[0]?.status === "Refunded") {
+        const err = new Error(
+          "Deposit refund has already been marked Refunded; meter readings are locked."
+        );
+        err.statusCode = 409;
+        throw err;
+      }
+
+      const nextOpening =
+        openingUnit !== undefined && openingUnit !== null && openingUnit !== ""
+          ? Number(openingUnit)
+          : booking.meter_opening_unit !== null && booking.meter_opening_unit !== undefined
+          ? Number(booking.meter_opening_unit)
+          : null;
+
+      const nextClosing =
+        closingUnit !== undefined && closingUnit !== null && closingUnit !== ""
+          ? Number(closingUnit)
+          : booking.meter_closing_unit !== null && booking.meter_closing_unit !== undefined
+          ? Number(booking.meter_closing_unit)
+          : null;
+
+      if (nextOpening !== null && (!Number.isFinite(nextOpening) || nextOpening < 0)) {
+        const err = new Error("Opening meter unit must be a non-negative number.");
+        err.statusCode = 400;
+        throw err;
+      }
+      if (nextClosing !== null && (!Number.isFinite(nextClosing) || nextClosing < 0)) {
+        const err = new Error("Closing meter unit must be a non-negative number.");
+        err.statusCode = 400;
+        throw err;
+      }
+      if (nextOpening !== null && nextClosing !== null && nextClosing < nextOpening) {
+        const err = new Error(
+          `Closing meter unit (${nextClosing}) cannot be less than opening unit (${nextOpening}).`
+        );
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const nextRate =
+        electricityRatePerUnit !== undefined
+          ? Math.max(0, Number(electricityRatePerUnit))
+          : Number(booking.electricity_rate_per_unit ?? 12);
+      if (!Number.isFinite(nextRate) || nextRate < 0) {
+        const err = new Error("Electricity rate per unit must be 0 or greater.");
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const nextWaived =
+        electricityWaived !== undefined
+          ? electricityWaived
+            ? 1
+            : 0
+          : booking.electricity_waived
+          ? 1
+          : 0;
+
+      const actor = req.user.name || req.user.userId;
+      const openingChanged =
+        openingUnit !== undefined && openingUnit !== null && openingUnit !== "";
+      const closingChanged =
+        closingUnit !== undefined && closingUnit !== null && closingUnit !== "";
+
+      await conn.execute(
+        `UPDATE bookings SET
+          electricity_rate_per_unit = ?,
+          electricity_waived = ?,
+          meter_opening_unit = ?,
+          meter_opening_at = CASE WHEN ? = 1 THEN NOW() ELSE meter_opening_at END,
+          meter_opening_by = CASE WHEN ? = 1 THEN ? ELSE meter_opening_by END,
+          meter_closing_unit = ?,
+          meter_closing_at = CASE WHEN ? = 1 THEN NOW() ELSE meter_closing_at END,
+          meter_closing_by = CASE WHEN ? = 1 THEN ? ELSE meter_closing_by END
+         WHERE id = ?`,
+        [
+          nextRate,
+          nextWaived,
+          nextOpening,
+          openingChanged ? 1 : 0,
+          openingChanged ? 1 : 0,
+          actor,
+          nextClosing,
+          closingChanged ? 1 : 0,
+          closingChanged ? 1 : 0,
+          actor,
+          booking.id,
+        ]
+      );
+
+      const unitsConsumed =
+        nextOpening !== null && nextClosing !== null ? Number((nextClosing - nextOpening).toFixed(2)) : null;
+      const electricityCharge =
+        unitsConsumed !== null && !nextWaived ? Math.round(unitsConsumed * nextRate) : 0;
+
+      await recordActivity(conn, {
+        userLabel: actor,
+        module: "Maintenance",
+        action: `Recorded electricity meter for #${booking.receipt_no}`,
+        detail:
+          unitsConsumed !== null
+            ? `Opening ${nextOpening} → Closing ${nextClosing} (${unitsConsumed} units @ ₹${nextRate}/unit = ₹${electricityCharge})`
+            : `Opening meter unit recorded: ${nextOpening}`,
+        category: "Repairs",
+        alertTitle: `Meter Reading Updated — #${booking.receipt_no}`,
+        alertDetail:
+          unitsConsumed !== null
+            ? `${unitsConsumed} units · Electricity ₹${electricityCharge.toLocaleString("en-IN")}`
+            : `Opening: ${nextOpening} units`,
+        href: `/inspections/${booking.receipt_no}`,
+      });
+
+      const [after] = await conn.execute("SELECT * FROM bookings WHERE id = ? LIMIT 1", [
+        booking.id,
+      ]);
+      return {
+        booking: mapBooking(after[0]),
+        unitsConsumed,
+        electricityCharge,
+      };
+    });
+
+    res.json({ success: true, ...result });
+  })
+);
+
 router.post(
   "/hall-checks/save-to-refund",
   asyncHandler(async (req, res) => {
@@ -659,7 +851,37 @@ router.post(
       );
 
       const issues = checklistItems.filter((i) => i.status === "Issue");
-      const totalDeduction = issues.reduce((acc, i) => acc + Math.round(Number(i.issueCost || 0)), 0);
+      const checklistDeduction = issues.reduce(
+        (acc, i) => acc + Math.round(Number(i.issueCost || 0)),
+        0
+      );
+
+      // Compute electricity bill from booking's recorded opening/closing meter readings
+      let electricityUnits = 0;
+      let electricityCharge = 0;
+      let electricityRate = Number(targetBooking?.electricity_rate_per_unit ?? 12);
+      const hasOpening =
+        targetBooking?.meter_opening_unit !== null &&
+        targetBooking?.meter_opening_unit !== undefined;
+      const hasClosing =
+        targetBooking?.meter_closing_unit !== null &&
+        targetBooking?.meter_closing_unit !== undefined;
+      if (
+        mode === "After Event" &&
+        targetBooking &&
+        !targetBooking.electricity_waived &&
+        hasOpening &&
+        hasClosing
+      ) {
+        const openVal = Number(targetBooking.meter_opening_unit);
+        const closeVal = Number(targetBooking.meter_closing_unit);
+        if (closeVal >= openVal) {
+          electricityUnits = Number((closeVal - openVal).toFixed(2));
+          electricityCharge = Math.round(electricityUnits * electricityRate);
+        }
+      }
+
+      const totalDeduction = checklistDeduction + electricityCharge;
 
       if (mode === "After Event" && totalDeduction > heldAmount) {
         const err = new Error(
@@ -697,12 +919,16 @@ router.post(
         }
       }
 
+      const noteParts = issues.map(
+        (i) => `${i.note || i.label} (₹${Math.round(Number(i.issueCost || 0))})`
+      );
+      if (electricityCharge > 0) {
+        noteParts.push(
+          `Electricity ${electricityUnits} units @ ₹${electricityRate}/unit (₹${electricityCharge})`
+        );
+      }
       const deductionNote =
-        issues.length > 0
-          ? issues
-              .map((i) => `${i.note || i.label} (₹${Math.round(Number(i.issueCost || 0))})`)
-              .join(", ")
-          : "Hall checked — zero damage";
+        noteParts.length > 0 ? noteParts.join(", ") : "Hall checked — zero damage";
 
       let updatedRefund = null;
 
@@ -726,7 +952,9 @@ router.post(
 
         const inspectionRef = `INS-${new Date().getFullYear()}-${effectiveReceiptNo}-B · ${
           issues.length
-        } ${issues.length === 1 ? "issue" : "issues"}`;
+        } ${issues.length === 1 ? "issue" : "issues"}${
+          electricityCharge > 0 ? ` + ${electricityUnits} kWh` : ""
+        }`;
 
         if (!refund && targetBooking) {
           const newRefundId = generateId("ref");
@@ -762,7 +990,7 @@ router.post(
         }
 
         if (refund) {
-          // Count After Event photos per checklist item (never duplicating a global total across unrelated lines)
+          // Count After Event photos: prefer per-item tagged count, else fall back to untagged After-Event photos
           const [photoCounts] = await conn.execute(
             `SELECT checklist_item_id, COUNT(*) AS cnt
              FROM inspection_photos
@@ -771,15 +999,19 @@ router.post(
             [refund.booking_receipt_no]
           );
           const countByItem = new Map();
+          let untaggedAfterCount = 0;
           for (const row of photoCounts) {
             if (row.checklist_item_id) {
               countByItem.set(row.checklist_item_id, Number(row.cnt || 0));
+            } else {
+              untaggedAfterCount += Number(row.cnt || 0);
             }
           }
 
           await conn.execute("DELETE FROM deposit_deduction_items WHERE refund_id = ?", [refund.id]);
           for (const issue of issues) {
-            const linkedPhotoCount = countByItem.get(issue.id) || 0;
+            const taggedCount = countByItem.get(issue.id) || 0;
+            const linkedPhotoCount = taggedCount > 0 ? taggedCount : untaggedAfterCount;
             await conn.execute(
               `INSERT INTO deposit_deduction_items (id, refund_id, item, location, photos_count, amount)
                VALUES (?, ?, ?, 'Hall Inspection', ?, ?)`,
@@ -789,6 +1021,21 @@ router.post(
                 issue.note ? `${issue.label} (${issue.note})` : issue.label,
                 linkedPhotoCount,
                 Math.round(Number(issue.issueCost || 0)),
+              ]
+            );
+          }
+
+          if (electricityCharge > 0 && targetBooking) {
+            const meterPhotosCount = countByItem.get("meter-closing") || 0;
+            await conn.execute(
+              `INSERT INTO deposit_deduction_items (id, refund_id, item, location, photos_count, amount)
+               VALUES (?, ?, ?, 'Electricity Meter', ?, ?)`,
+              [
+                generateId("dd"),
+                refund.id,
+                `Electricity Bill — ${electricityUnits} units @ ₹${electricityRate}/unit (${Number(targetBooking.meter_opening_unit)} → ${Number(targetBooking.meter_closing_unit)})`,
+                meterPhotosCount,
+                electricityCharge,
               ]
             );
           }

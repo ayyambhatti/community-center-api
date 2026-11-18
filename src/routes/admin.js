@@ -5,6 +5,7 @@ const { requireAuth, requireRole } = require("../middleware/auth");
 const { asyncHandler } = require("../middleware/errorHandler");
 const { generateId, getSystemSettings, recordActivity } = require("../utils/audit");
 const { mapApproval, mapNotification, mapRolePermission, mapSystemSettings, mapUser } = require("../utils/formatters");
+const { ensureModule5AndFinanceSchema } = require("../utils/schemaEnsure");
 
 const router = express.Router();
 router.use(
@@ -487,6 +488,7 @@ router.get(
   "/settings",
   requireRole("Admin"),
   asyncHandler(async (req, res) => {
+    await ensureModule5AndFinanceSchema();
     const row = await getSystemSettings();
     res.json({ success: true, settings: mapSystemSettings(row) });
   })
@@ -496,6 +498,7 @@ router.put(
   "/settings",
   requireRole("Admin"),
   asyncHandler(async (req, res) => {
+    await ensureModule5AndFinanceSchema();
     const body = req.body || {};
     const updated = await withTransaction(async (conn) => {
       const current = await getSystemSettings(conn);
@@ -514,6 +517,7 @@ router.put(
           base_rent_per_floor = ?,
           ac_surcharge_per_floor = ?,
           default_security_deposit = ?,
+          electricity_rate_per_unit = ?,
           max_upload_size_mb = ?,
           require_free_use_admin_approval = ?,
           require_booking_admin_approval = ?,
@@ -537,6 +541,7 @@ router.put(
           Number(body.baseRentPerFloor ?? current.base_rent_per_floor),
           Number(body.acSurchargePerFloor ?? current.ac_surcharge_per_floor),
           Number(body.defaultSecurityDeposit ?? current.default_security_deposit),
+          Math.max(0, Number(body.electricityRatePerUnit ?? current.electricity_rate_per_unit ?? 12)),
           Number(body.maxUploadSizeMb ?? current.max_upload_size_mb ?? 5),
           boolVal(body.requireFreeUseAdminApproval, current.require_free_use_admin_approval),
           boolVal(body.requireBookingAdminApproval, current.require_booking_admin_approval ?? 1),

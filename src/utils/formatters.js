@@ -47,6 +47,7 @@ function mapSystemSettings(row) {
     baseRentPerFloor: Number(row.base_rent_per_floor),
     acSurchargePerFloor: Number(row.ac_surcharge_per_floor),
     defaultSecurityDeposit: Number(row.default_security_deposit),
+    electricityRatePerUnit: Number(row.electricity_rate_per_unit ?? 12),
     maxUploadSizeMb: Number(row.max_upload_size_mb ?? 5),
     requireFreeUseAdminApproval: Boolean(row.require_free_use_admin_approval),
     requireBookingAdminApproval: Boolean(row.require_booking_admin_approval ?? true),
@@ -103,6 +104,20 @@ function mapBooking(row) {
     postInspectionDone: Boolean(row.post_inspection_done),
     depositStatus: row.deposit_status,
     cancellationReason: row.cancellation_reason || undefined,
+    electricityRatePerUnit: Number(row.electricity_rate_per_unit ?? 12),
+    electricityWaived: Boolean(row.electricity_waived),
+    meterOpeningUnit:
+      row.meter_opening_unit !== null && row.meter_opening_unit !== undefined
+        ? Number(row.meter_opening_unit)
+        : undefined,
+    meterOpeningAt: row.meter_opening_at || undefined,
+    meterOpeningBy: row.meter_opening_by || undefined,
+    meterClosingUnit:
+      row.meter_closing_unit !== null && row.meter_closing_unit !== undefined
+        ? Number(row.meter_closing_unit)
+        : undefined,
+    meterClosingAt: row.meter_closing_at || undefined,
+    meterClosingBy: row.meter_closing_by || undefined,
   };
 }
 
@@ -161,7 +176,22 @@ function mapDepositRefund(row, deductionItems = []) {
   };
 }
 
-function mapMaintenanceTicket(row, quotations = []) {
+function mapMaintenanceTicket(row, quotations = [], { includePhotoData = false } = {}) {
+  const rawPhotos = parseJsonArray(row.photos_json);
+  const photos = includePhotoData
+    ? rawPhotos
+    : rawPhotos.map((p, idx) => {
+        if (typeof p === "string") return p;
+        if (p && typeof p === "object") {
+          return {
+            id: p.id || `ph-${idx}`,
+            name: p.name || `Photo ${idx + 1}`,
+            sizeKb: p.sizeKb,
+            hasImage: Boolean(p.dataUrl && String(p.dataUrl).startsWith("data:image/")),
+          };
+        }
+        return p;
+      });
   return {
     id: row.id,
     ticketNo: row.ticket_no,
@@ -176,7 +206,8 @@ function mapMaintenanceTicket(row, quotations = []) {
     status: row.status,
     description: row.description || undefined,
     attachmentsLabel: row.attachments_label || undefined,
-    photos: parseJsonArray(row.photos_json),
+    photos,
+    photoCount: rawPhotos.length,
     quotations: quotations.map((q) => ({
       id: q.id,
       vendor: q.vendor,
